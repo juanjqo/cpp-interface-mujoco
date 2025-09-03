@@ -136,7 +136,7 @@ void cleanup() {
 
 int main(void) {
     // load model from file and check for errors
-    m = mj_loadXML("example.xml", NULL, error, 1000);
+    m = mj_loadXML("boston_dynamics_spot/scene_arm.xml", NULL, error, 1000);
     if (!m) {
         std::cout<<error<<std::endl;
         return 1;
