@@ -105,6 +105,8 @@ public:
     //std::atomic<bool> render_loop_started_{false};
     VectorXd qpos_;
     VectorXd qvel_;
+    std::unordered_map<std::string, int> handles_map_; //
+
 public:
     std::string xml_model_;
     mjModel* m_ = nullptr;  // MuJoCo model
@@ -260,9 +262,63 @@ public:
         if (!m_ || !d_)
             throw std::runtime_error("Model or data not initialized");
         mj_step(m_, d_);
-        d_->qpos[0] = 0.5 * sin(2.0 * d_->time);
+        //mj_forward(m_, d_);
+        //d_->qpos[0] = 0.5 * sin(2.0 * d_->time);
         qpos_ = Eigen::Map<Eigen::VectorXd>(d_->qpos, m_->nq);
         qvel_ = Eigen::Map<Eigen::VectorXd>(d_->qvel, m_->nv);
+    }
+
+    int _get_handle_from_map(const std::string& objectname)
+    {
+        auto search = handles_map_.find(objectname);
+        // returns a tuple <bool, int>
+        //If the handle is found in the map, returns <true, handle>.
+
+        if (search != handles_map_.end())
+        { // handle found in map
+            return search->second;
+        }
+        else
+        {   // handle not found in map. Therefore, it is taken from CoppeliaSim and the map
+            // is updated;
+            return get_object_handle(objectname);
+        }
+    }
+
+    int get_object_handle(const std::string& objectname)
+    {
+        int handle;
+        auto error_msg =
+
+            " \n"
+            + std::string("The object \"")
+            + objectname + std::string("\"")
+                         + std::string(" does not exist in the XML model. \n");
+        try
+        {
+            handle = mj_name2id(m_, mjOBJ_JOINT, objectname.c_str());
+            //If the handle is not included in the map, then the map is updated.
+            if (handle == -1)
+                throw std::runtime_error(error_msg);
+            handles_map_.try_emplace(objectname, handle);
+        }
+        catch(const std::runtime_error& e)
+        {
+            throw std::runtime_error(std::string(e.what()) + error_msg);
+        }
+        return handle;
+    }
+
+    double   _get_joint_position(const std::string& jointname)
+    {
+        int qpos_adr = m_->jnt_qposadr[_get_handle_from_map(jointname)];
+        return qpos_[qpos_adr];
+    }
+
+    void _set_joint_target_position(const std::string& jointname, const double& angle_rad)
+    {
+        int qpos_adr = m_->jnt_qposadr[_get_handle_from_map(jointname)];
+        d_->qpos[qpos_adr] = angle_rad;
     }
 
 
@@ -302,7 +358,20 @@ void DQ_MujocoInterface::render()
     impl_->render();
 }
 
-VectorXd DQ_MujocoInterface::get_joint_positions() const
+VectorXd DQ_MujocoInterface::get_joint_positions(const std::vector<std::string> &jointnames) const
 {
-    return impl_->qpos_;
+    int n = jointnames.size();
+    VectorXd joint_positions(n);
+    for(auto i=0;i<n;i++)
+        joint_positions(i)=impl_->_get_joint_position(jointnames.at(i));
+    return joint_positions;
 }
+
+void DQ_MujocoInterface::set_joint_target_positions(const std::vector<std::string>& jointnames,
+                                                    const VectorXd& angles_rad)
+{
+    for(std::size_t i=0;i<jointnames.size();i++)
+        impl_->_set_joint_target_position(jointnames.at(i), angles_rad(i));
+}
+
+

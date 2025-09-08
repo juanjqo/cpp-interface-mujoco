@@ -21,7 +21,7 @@ target_link_libraries(dqrobotics-interface-mujoco
 add_executable(test2 main.cpp)
 target_link_libraries(test2 dqrobotics-interface-mujoco ${MUJOCO_LIBS})
 
-set(XML_MODEL ${CMAKE_SOURCE_DIR}/../franka_fr3/)
+set(XML_MODEL ${CMAKE_SOURCE_DIR}/../boston_dynamics_spot/)
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory #copy_if_different
         ${XML_MODEL}

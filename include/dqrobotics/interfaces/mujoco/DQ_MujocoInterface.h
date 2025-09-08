@@ -28,6 +28,7 @@ Contributors:
 #pragma once
 #include <dqrobotics/DQ.h>
 #include <memory>
+#include <unordered_map>
 
 using namespace DQ_robotics;
 using namespace Eigen;
@@ -47,11 +48,17 @@ public:
     bool should_close_window() const;
     void render();
 
-    VectorXd get_joint_positions() const;
+    VectorXd get_joint_positions(const std::vector<std::string>& jointnames) const;
+    void set_joint_target_positions(const std::vector<std::string>& jointnames,
+                                    const VectorXd& angles_rad);
+
 
     virtual ~DQ_MujocoInterface() = default;
 private:
     class Impl;
     std::shared_ptr<Impl> impl_;
     const std::string error_msg_layout_ = "Bad call in DQ_MujocoInterface::";
+
+
 };
+
