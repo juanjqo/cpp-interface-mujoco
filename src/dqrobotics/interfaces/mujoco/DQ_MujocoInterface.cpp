@@ -25,7 +25,7 @@ Contributors:
 */
 
 #include <dqrobotics/interfaces/mujoco/DQ_MujocoInterface.h>
-#include <thread>
+//#include <thread>
 #include "mujoco/mujoco.h"
 #include "GLFW/glfw3.h"
 
@@ -38,6 +38,68 @@ Contributors:
 
 class DQ_MujocoInterface::Impl
 {
+public:
+    // Static callback wrappers
+    static void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
+        Impl* self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
+        if (self) {
+            self->mouse_button(window, button, action, mods);
+        }
+    }
+
+    static void mouse_move_callback(GLFWwindow* window, double xpos, double ypos) {
+        Impl* self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
+        if (self) {
+            self->mouse_move(window, xpos, ypos);
+        }
+    }
+
+    static void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
+        Impl* self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
+        if (self) {
+            self->scroll(window, yoffset);
+        }
+    }
+
+    // Mouse button handler
+    void mouse_button(GLFWwindow* window, int button, int action, int mods) {
+        button_left_ = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS);
+        button_middle_ = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS);
+        button_right_ = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS);
+        glfwGetCursorPos(window, &lastx_, &lasty_);
+    }
+
+    // Mouse move handler
+    void mouse_move(GLFWwindow* window, double xpos, double ypos) {
+        if (!button_left_ && !button_middle_ && !button_right_)
+            return;
+        double dx = xpos - lastx_;
+        double dy = ypos - lasty_;
+        lastx_ = xpos;
+        lasty_ = ypos;
+
+        int width, height;
+        glfwGetWindowSize(window, &width, &height);
+
+        bool shift = (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+                      glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
+
+        mjtMouse action;
+        if (button_right_) {
+            action = shift ? mjMOUSE_MOVE_H : mjMOUSE_MOVE_V;
+        } else if (button_left_) {
+            action = shift ? mjMOUSE_ROTATE_H : mjMOUSE_ROTATE_V;
+        } else {
+            action = mjMOUSE_ZOOM;
+        }
+        mjv_moveCamera(m_, action, dx / height, dy / height, &scn_, &cam_);
+    }
+
+    // Scroll handler
+    void scroll(GLFWwindow* window, double yoffset) {
+        mjv_moveCamera(m_, mjMOUSE_ZOOM, 0, 0.05 * yoffset, &scn_, &cam_);
+    }
+
 public:
     //std::thread render_thread_;
     //std::atomic<bool> render_loop_started_{false};
@@ -55,12 +117,29 @@ public:
 
     GLFWwindow* window_ = nullptr;
 
+    // Mouse state
+    bool button_left_ = false;
+    bool button_middle_ = false;
+    bool button_right_ = false;
+    double lastx_ = 0;
+    double lasty_ = 0;
+
+    bool show_profiler_ = true;  // Control flag for showing profiler
+    mjrRect profiler_rect_;
+
+    /**
+     * @brief Impl
+     */
     Impl()
     {
         std::cerr<<"DQ_MujocoInterface::Impl ctor"<<std::endl;
         //render_loop_started_ = false;
 
     };
+
+    /**
+     * @brief ~Impl() Destructor of the class
+     */
     ~Impl(){
         std::cerr<<"DQ_MujocoInterface::Impl destroyed"<<std::endl;
         // close GLFW, free visualization storage
@@ -73,8 +152,12 @@ public:
         //free MuJoCo model and data
         if (d_) mj_deleteData(d_);
         if (m_) mj_deleteModel(m_);
-
     }
+
+    /**
+     * @brief load_model
+     * @param xml_model
+     */
     void load_model(const std::string& xml_model)
     {
         if (xml_model.empty())
@@ -93,42 +176,31 @@ public:
         initialize(1280, 920, "test");
     }
 
+    /**
+     * @brief initialize
+     * @param width
+     * @param height
+     * @param title
+     */
     void initialize(const int &width, const int &height, const std::string& title)
     {
-        /*
-        glfwSetErrorCallback(glfw_error_callback);
-        if (!glfwInit())
-            throw std::runtime_error("Error in glfwInit()");
-
-// Decide GL+GLSL versions
-#if defined(IMGUI_IMPL_OPENGL_ES2)
-        // GL ES 2.0 + GLSL 100
-        const char* glsl_version = "#version 100";
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
-        glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_ES_API);
-#elif defined(__APPLE__)
-        // GL 3.2 + GLSL 150
-        const char* glsl_version = "#version 150";
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
-        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);  // 3.2+ only
-        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);            // Required on Mac
-#else
-        // GL 3.0 + GLSL 130
-        const char* glsl_version = "#version 130";
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
-#endif
-*/
         if (!glfwInit())
             throw std::runtime_error("Error in glfwInit()");
         window_ =  glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
         if (window_ == nullptr)
             throw std::runtime_error("Error in window()");
 
+        // Store this pointer for callbacks
+        glfwSetWindowUserPointer(window_, this);
+
         glfwMakeContextCurrent(window_);
         glfwSwapInterval(1); // Enable vsync
+
+        // Set callbacks using static wrapper functions
+        glfwSetMouseButtonCallback(window_, &Impl::mouse_button_callback);
+        glfwSetCursorPosCallback(window_, &Impl::mouse_move_callback);
+        glfwSetScrollCallback(window_, &Impl::scroll_callback);
+
 
         // initialize visualization data structures
         mjv_defaultCamera(&cam_);
@@ -139,9 +211,17 @@ public:
         // Create scene and context
         mjv_makeScene(m_, &scn_, 2000);
         mjr_makeContext(m_, &con_, mjFONTSCALE_150);
+
+         // Initialize profiler rectangle
+        profiler_rect_.left = width - 310;  // Right side with some margin
+        profiler_rect_.bottom = height - 210;
+        profiler_rect_.width = 300;
+        profiler_rect_.height = 200;
     }
 
-
+    /**
+     * @brief render
+     */
     void render()
     {
         // get framebuffer viewport
@@ -152,6 +232,19 @@ public:
         mjv_updateScene(m_, d_, &opt_, NULL, &cam_, mjCAT_ALL, &scn_);
         mjr_render(viewport, &scn_, &con_);
 
+        if (show_profiler_)
+        {
+            // Update profiler position based on current viewport size
+            profiler_rect_.left = viewport.width - 310;
+            profiler_rect_.bottom = viewport.height - 210;
+
+            // Show MuJoCo's built-in profiler
+            mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, profiler_rect_,
+                        "Profiler", nullptr, &con_);
+
+        }
+
+
         // swap OpenGL buffers (blocking call due to v-sync)
         glfwSwapBuffers(window_);
 
@@ -159,6 +252,9 @@ public:
         glfwPollEvents();
     }
 
+    /**
+     * @brief step_simulation
+     */
     void step_simulation()
     {
         if (!m_ || !d_)
@@ -175,7 +271,6 @@ public:
 DQ_MujocoInterface::DQ_MujocoInterface()
 {
     impl_ = std::make_shared<DQ_MujocoInterface::Impl>();
-
 }
 
 
