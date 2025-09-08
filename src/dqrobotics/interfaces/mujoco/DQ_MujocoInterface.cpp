@@ -24,6 +24,7 @@ Contributors:
 
 */
 
+#include <chrono>
 #include <dqrobotics/interfaces/mujoco/DQ_MujocoInterface.h>
 //#include <thread>
 #include "mujoco/mujoco.h"
@@ -123,11 +124,15 @@ public:
     bool button_left_ = false;
     bool button_middle_ = false;
     bool button_right_ = false;
-    double lastx_ = 0;
-    double lasty_ = 0;
+    double lastx_{0};
+    double lasty_{0};
 
     bool show_profiler_ = true;  // Control flag for showing profiler
-    mjrRect profiler_rect_;
+    int frame_count_{0};
+    double fps_{0};
+    std::chrono::high_resolution_clock::time_point last_time_;
+    double computation_time_{0};
+    //mjrRect profiler_rect_;
 
     /**
      * @brief Impl
@@ -213,12 +218,20 @@ public:
         // Create scene and context
         mjv_makeScene(m_, &scn_, 2000);
         mjr_makeContext(m_, &con_, mjFONTSCALE_150);
+        last_time_ = std::chrono::high_resolution_clock::now();
 
-         // Initialize profiler rectangle
-        profiler_rect_.left = width - 310;  // Right side with some margin
-        profiler_rect_.bottom = height - 210;
-        profiler_rect_.width = 300;
-        profiler_rect_.height = 200;
+    }
+    void update_fps()
+    {
+        frame_count_++;
+        auto  now = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = now - last_time_;
+        if (elapsed.count() >= 0.1)
+        {
+            fps_ = frame_count_/elapsed.count();
+            frame_count_ = 0;
+            last_time_ = now;
+        }
     }
 
     /**
@@ -234,15 +247,34 @@ public:
         mjv_updateScene(m_, d_, &opt_, NULL, &cam_, mjCAT_ALL, &scn_);
         mjr_render(viewport, &scn_, &con_);
 
+
+
         if (show_profiler_)
         {
             // Update profiler position based on current viewport size
-            profiler_rect_.left = viewport.width - 310;
-            profiler_rect_.bottom = viewport.height - 210;
+            mjrRect profiler_rect;
+            profiler_rect.left = viewport.width - 310;
+            profiler_rect.bottom = viewport.height - 210;
+            profiler_rect.width = 300;
+            profiler_rect.height = 200;
 
             // Show MuJoCo's built-in profiler
-            mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, profiler_rect_,
-                        "Profiler", nullptr, &con_);
+            std::string simulation_time_text = "t: " + std::to_string(d_->time) + "s";
+            mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, {viewport.width - 310, viewport.height - 210, 300, 200},
+                        simulation_time_text.c_str(), nullptr, &con_);
+
+
+
+            // Show MuJoCo's built-in profiler
+            std::string text = "fps: "+std::to_string(fps_);
+            mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, {viewport.width - 310, viewport.height - 250, 300, 200},
+                        text.c_str(), nullptr, &con_);
+
+            // Show MuJoCo's built-in profiler
+            std::string text2 = "ct: "+std::to_string(fps_)+" us";
+            mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, {viewport.width - 310, viewport.height - 290, 300, 200},
+                        text2.c_str(), nullptr, &con_);
+
 
         }
 
@@ -252,6 +284,7 @@ public:
 
         // process pending GUI events, call GLFW callbacks
         glfwPollEvents();
+        update_fps();
     }
 
     /**
@@ -259,6 +292,8 @@ public:
      */
     void step_simulation()
     {
+        auto start = std::chrono::high_resolution_clock::now();
+        //------------------------------------------------------------
         if (!m_ || !d_)
             throw std::runtime_error("Model or data not initialized");
         mj_step(m_, d_);
@@ -266,6 +301,10 @@ public:
         //d_->qpos[0] = 0.5 * sin(2.0 * d_->time);
         qpos_ = Eigen::Map<Eigen::VectorXd>(d_->qpos, m_->nq);
         qvel_ = Eigen::Map<Eigen::VectorXd>(d_->qvel, m_->nv);
+        //------------------------------------------------------------
+
+        auto end = std::chrono::high_resolution_clock::now();
+        computation_time_ = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
     }
 
     int _get_handle_from_map(const std::string& objectname)
