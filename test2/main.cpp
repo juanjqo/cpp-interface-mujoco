@@ -29,7 +29,7 @@ int main() {
         double simstart = mi.get_simulation_time();
         while( mi.get_simulation_time() - simstart < 1.0/60.0 )
            mi.trigger_next_simulation_step();
-        //std::cout<<"q: "<<mi.get_joint_positions().transpose()<<std::endl;
+        std::cout<<"q: "<<mi.get_joint_positions().transpose()<<std::endl;
         mi.render();
     }
     return 0;
