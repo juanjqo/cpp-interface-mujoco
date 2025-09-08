@@ -28,7 +28,7 @@ Contributors:
 #pragma once
 #include <dqrobotics/DQ.h>
 #include <memory>
-#include <unordered_map>
+
 
 using namespace DQ_robotics;
 using namespace Eigen;
@@ -58,6 +58,7 @@ private:
     class Impl;
     std::shared_ptr<Impl> impl_;
     const std::string error_msg_layout_ = "Bad call in DQ_MujocoInterface::";
+    void _check_model() const;
 
 
 };

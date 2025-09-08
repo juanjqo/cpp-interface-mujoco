@@ -26,6 +26,7 @@ Contributors:
 
 #include <chrono>
 #include <dqrobotics/interfaces/mujoco/DQ_MujocoInterface.h>
+#include <unordered_map>
 //#include <thread>
 #include "mujoco/mujoco.h"
 #include "GLFW/glfw3.h"
@@ -55,7 +56,7 @@ public:
         }
     }
 
-    static void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
+    static void scroll_callback(GLFWwindow* window, [[maybe_unused]] double xoffset, double yoffset) {
         Impl* self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
         if (self) {
             self->scroll(window, yoffset);
@@ -63,7 +64,7 @@ public:
     }
 
     // Mouse button handler
-    void mouse_button(GLFWwindow* window, int button, int action, int mods) {
+    void mouse_button(GLFWwindow* window, [[maybe_unused]] int button, [[maybe_unused]] int action, [[maybe_unused]] int mods) {
         button_left_ = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS);
         button_middle_ = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS);
         button_right_ = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS);
@@ -97,7 +98,7 @@ public:
     }
 
     // Scroll handler
-    void scroll(GLFWwindow* window, double yoffset) {
+    void scroll([[maybe_unused]] GLFWwindow* window, double yoffset) {
         mjv_moveCamera(m_, mjMOUSE_ZOOM, 0, 0.05 * yoffset, &scn_, &cam_);
     }
 
@@ -110,6 +111,7 @@ public:
 
 public:
     std::string xml_model_;
+    bool model_loaded_{false};
     mjModel* m_ = nullptr;  // MuJoCo model
     mjData* d_ = nullptr;   // MuJoCo data
 
@@ -132,7 +134,8 @@ public:
     double fps_{0};
     std::chrono::high_resolution_clock::time_point last_time_;
     double computation_time_{0};
-    //mjrRect profiler_rect_;
+    double avg_computation_time_microseconds_{50.0};
+    double computation_time_samples_ = 1000;
 
     /**
      * @brief Impl
@@ -140,8 +143,7 @@ public:
     Impl()
     {
         std::cerr<<"DQ_MujocoInterface::Impl ctor"<<std::endl;
-        //render_loop_started_ = false;
-
+        model_loaded_ = false;
     };
 
     /**
@@ -181,6 +183,7 @@ public:
         qpos_ = Eigen::Map<Eigen::VectorXd>(d_->qpos, m_->nq);
         qvel_ = Eigen::Map<Eigen::VectorXd>(d_->qvel, m_->nv);
         initialize(1280, 920, "test");
+        model_loaded_ = true;
     }
 
     /**
@@ -207,6 +210,12 @@ public:
         glfwSetMouseButtonCallback(window_, &Impl::mouse_button_callback);
         glfwSetCursorPosCallback(window_, &Impl::mouse_move_callback);
         glfwSetScrollCallback(window_, &Impl::scroll_callback);
+
+
+
+
+        // Reduce geometry quality
+        //opt_.quality = mjQUALITY_LOW;       // Lowest quality settings
 
 
         // initialize visualization data structures
@@ -252,11 +261,13 @@ public:
         if (show_profiler_)
         {
             // Update profiler position based on current viewport size
+            /*
             mjrRect profiler_rect;
             profiler_rect.left = viewport.width - 310;
             profiler_rect.bottom = viewport.height - 210;
             profiler_rect.width = 300;
             profiler_rect.height = 200;
+            */
 
             // Show MuJoCo's built-in profiler
             std::string simulation_time_text = "t: " + std::to_string(d_->time) + "s";
@@ -271,7 +282,7 @@ public:
                         text.c_str(), nullptr, &con_);
 
             // Show MuJoCo's built-in profiler
-            std::string text2 = "ct: "+std::to_string(fps_)+" us";
+            std::string text2 = "ct: "+std::to_string(avg_computation_time_microseconds_)+" us";
             mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, {viewport.width - 310, viewport.height - 290, 300, 200},
                         text2.c_str(), nullptr, &con_);
 
@@ -305,6 +316,10 @@ public:
 
         auto end = std::chrono::high_resolution_clock::now();
         computation_time_ = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+
+        const double& N = computation_time_samples_;
+
+        avg_computation_time_microseconds_ = (1.0/N)*computation_time_ + ((N-1.0)/N)*avg_computation_time_microseconds_ ;
     }
 
     int _get_handle_from_map(const std::string& objectname)
@@ -362,10 +377,17 @@ public:
 
 
 };
+///------------------------------------------------------------------------------------------------
 
 DQ_MujocoInterface::DQ_MujocoInterface()
 {
     impl_ = std::make_shared<DQ_MujocoInterface::Impl>();
+}
+
+void DQ_MujocoInterface::_check_model() const
+{
+    if (!impl_->model_loaded_)
+        throw std::runtime_error("Undefined xml model. You must load the model first");
 }
 
 
@@ -379,26 +401,31 @@ void DQ_MujocoInterface::load_model(const std::string &xml_model)
 
 void DQ_MujocoInterface::trigger_next_simulation_step() const
 {
+    _check_model();
     impl_->step_simulation();
 }
 
 double DQ_MujocoInterface::get_simulation_time() const
 {
+    _check_model();
     return impl_->d_->time;
 }
 
 bool DQ_MujocoInterface::should_close_window() const
 {
+    _check_model();
     return glfwWindowShouldClose(impl_->window_);
 }
 
 void DQ_MujocoInterface::render()
 {
+    _check_model();
     impl_->render();
 }
 
 VectorXd DQ_MujocoInterface::get_joint_positions(const std::vector<std::string> &jointnames) const
 {
+    _check_model();
     int n = jointnames.size();
     VectorXd joint_positions(n);
     for(auto i=0;i<n;i++)
@@ -409,6 +436,7 @@ VectorXd DQ_MujocoInterface::get_joint_positions(const std::vector<std::string> 
 void DQ_MujocoInterface::set_joint_target_positions(const std::vector<std::string>& jointnames,
                                                     const VectorXd& angles_rad)
 {
+    _check_model();
     for(std::size_t i=0;i<jointnames.size();i++)
         impl_->_set_joint_target_position(jointnames.at(i), angles_rad(i));
 }
