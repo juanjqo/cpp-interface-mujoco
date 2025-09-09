@@ -37,7 +37,8 @@ class DQ_MujocoInterface
 {
 public:
     DQ_MujocoInterface();
-
+    DQ_MujocoInterface(const DQ_MujocoInterface&) = delete;
+    DQ_MujocoInterface& operator= (const DQ_MujocoInterface&) = delete;
 
     void load_model(const std::string& xml_model);
 

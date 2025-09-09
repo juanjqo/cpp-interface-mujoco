@@ -235,7 +235,7 @@ public:
         frame_count_++;
         auto  now = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> elapsed = now - last_time_;
-        if (elapsed.count() >= 0.1)
+        if (elapsed.count() >= 1.0)
         {
             fps_ = frame_count_/elapsed.count();
             frame_count_ = 0;
@@ -277,7 +277,7 @@ public:
 
 
             // Show MuJoCo's built-in profiler
-            std::string text = "fps: "+std::to_string(fps_);
+            std::string text = "FPS: "+std::to_string(fps_);
             mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, {viewport.width - 310, viewport.height - 250, 300, 200},
                         text.c_str(), nullptr, &con_);
 

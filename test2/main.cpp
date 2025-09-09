@@ -27,15 +27,19 @@ int main() {
     while(!mi.should_close_window() && !kill_this_process)
     {
         double simstart = mi.get_simulation_time();
-        while( mi.get_simulation_time() - simstart < 1.0/30.0 )
+        while( mi.get_simulation_time() - simstart < 1.0/60.0 )
+        {
             mi.trigger_next_simulation_step();
+            VectorXd q_cmd = VectorXd::Zero(7);
+            double value = 0.5 * sin(8.0 * mi.get_simulation_time());
+            q_cmd << value, value,value, value,value, value, value;
+
+            mi.set_joint_target_positions({"fr3_joint1", "fr3_joint2","fr3_joint3", "fr3_joint4", "fr3_joint5", "fr3_joint6", "fr3_joint7"}, q_cmd);  //arm_sh0 for Spot arm
+
+        }
 
         //std::cout<<"q: "<<mi.get_joint_positions({"arm_sh0"}).transpose()<<std::endl;
-        VectorXd q_cmd = VectorXd::Zero(7);
-        double value = 0.5 * sin(8.0 * mi.get_simulation_time());
-        q_cmd << value, value,value, value,value, value, value;
-        if (mi.get_simulation_time() > 10)
-            mi.set_joint_target_positions({"fr3_joint1", "fr3_joint2","fr3_joint3", "fr3_joint4", "fr3_joint5", "fr3_joint6", "fr3_joint7"}, q_cmd);  //arm_sh0 for Spot arm
+
 
 
         mi.render();
