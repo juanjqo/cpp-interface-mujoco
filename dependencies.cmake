@@ -7,7 +7,7 @@ endif()
 include(FetchContent)
 
 # Pick your MuJoCo version
-set(MUJOCO_VERSION "3.3.5")
+set(MUJOCO_VERSION "3.8.1")
 
 # Download MuJoCo release from GitHub
 FetchContent_Declare(
