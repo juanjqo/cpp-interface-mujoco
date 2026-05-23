@@ -225,9 +225,17 @@ public:
         mjv_defaultScene(&scn_);
         mjr_defaultContext(&con_);
 
+
+
+
         // Create scene and context
         mjv_makeScene(m_, &scn_, 2000);
         mjr_makeContext(m_, &con_, mjFONTSCALE_150);
+
+
+
+
+
         last_time_ = std::chrono::high_resolution_clock::now();
 
     }
@@ -664,6 +672,72 @@ void DQ_MujocoInterface::render()
 {
     _check_model();
     impl_->render();
+}
+
+
+/**
+ * @brief Enable or disable wireframe rendering mode
+ * @param flag true to enable wireframe view, false to disable
+ *
+ * When enabled, all geometries are rendered as wireframe outlines instead
+ * of solid surfaces. This is useful for:
+ * - Debugging collision geometries and joint alignments
+ * - Understanding the structure of complex assemblies
+ * - Visualizing internal components that would otherwise be hidden
+ *
+ * Example usage:
+ * @code
+ * set_wireframe_view(true);   // Enable wireframe
+ * set_wireframe_view(false);  // Disable wireframe (back to solid)
+ * @endcode
+ *
+ * @note Wireframe view can also be toggled during simulation for dynamic debugging
+ * @see toggle_wireframe() for easy key-binding
+ */
+void DQ_MujocoInterface::set_wireframe_view(const bool &flag)
+{
+    _check_model();
+    impl_->scn_.flags[mjRND_WIREFRAME] = flag ? 1 : 0;
+}
+
+
+/**
+ * @brief Enable or disable joint frame/axis visualization
+ * @param flag true to show joint axes, false to hide them
+ *
+ * When enabled, this visualizes the position and orientation of all joint axes
+ * in the model. Each joint is displayed as a line or arrow indicating:
+ * - The joint's position in space
+ * - The axis direction (revolute joints: rotation axis, prismatic joints: translation axis)
+ *
+ * This is particularly useful for:
+ * - Debugging kinematic chains and joint placements
+ * - Verifying joint axis orientations are correct
+ * - Understanding robot structure without loading a full GUI
+ * - Teaching robot kinematics concepts
+ *
+ * Example usage:
+ * @code
+ * robot.set_jointframe_view(true);   // Show all joint axes
+ * robot.set_jointframe_view(false);  // Hide joint axes
+ * @endcode
+ *
+ * @note Joint axes are typically color-coded:
+ *       - Red: X-axis
+ *       - Green: Y-axis
+ *       - Blue: Z-axis
+ *
+ * @note This visualizes the FRAMES of joints, not to be confused with:
+ *       - set_wireframe_view() for mesh wireframes
+ *       - opt_.frame = mjFRAME_SITE for site frames
+ *
+ * @see set_wireframe_view() for wireframe rendering
+ * @see mjVIS_JOINT flag in MuJoCo documentation
+ */
+void DQ_MujocoInterface::set_jointframe_view(const bool &flag)
+{
+    _check_model();
+    impl_->opt_.flags[mjVIS_JOINT] = flag ? 1 : 0; // Enable visualization of joint axes
 }
 
 /**
