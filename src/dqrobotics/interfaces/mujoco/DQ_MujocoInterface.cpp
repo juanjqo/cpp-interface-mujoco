@@ -232,13 +232,11 @@ public:
         mjv_makeScene(m_, &scn_, 2000);
         mjr_makeContext(m_, &con_, mjFONTSCALE_150);
 
-
-
-
+        opt_.frame = mjFRAME_SITE;          // Show site frames
 
         last_time_ = std::chrono::high_resolution_clock::now();
-
     }
+
     void update_fps()
     {
         frame_count_++;
@@ -251,6 +249,8 @@ public:
             last_time_ = now;
         }
     }
+
+
 
     /**
      * @brief render
@@ -428,6 +428,70 @@ public:
             names.push_back(std::string(joint_name));
         }
         return names;
+    }
+
+    /**
+     * @brief Set the pose of a site (only works for sites attached to worldbody)
+     * @param site_name Name of the site
+     * @param pose New pose as a Dual Quaternion
+     *
+     * @warning This modifies the model's kinematics. Use sparingly.
+     * @note This is for static repositioning, not dynamic animation.
+     */
+    void _set_site_pose(const std::string& site_name, const DQ& pose)
+    {
+        int site_id = mj_name2id(m_, mjOBJ_SITE, site_name.c_str());
+        if (site_id == -1)
+            throw std::runtime_error("Site '" + site_name + "' not found");
+
+        // Get position from pose
+        VectorXd p = pose.translation().vec3();
+        VectorXd r = pose.P().vec4();
+
+        // Set position in model (not data!)
+        m_->site_pos[3 * site_id]     = p(0);
+        m_->site_pos[3 * site_id + 1] = p(1);
+        m_->site_pos[3 * site_id + 2] = p(2);
+
+        // Set orientation in model (as quaternion: w, x, y, z)
+        m_->site_quat[4 * site_id]     = r(0);
+        m_->site_quat[4 * site_id + 1] = r(1);
+        m_->site_quat[4 * site_id + 2] = r(2);
+        m_->site_quat[4 * site_id + 3] = r(3);
+
+        // Update kinematics to reflect changes
+        mj_forward(m_, d_);
+
+
+
+    }
+
+
+
+    DQ _get_site_pose(const std::string& site_name)
+    {
+        // Get the site ID
+        int site_id = mj_name2id(m_, mjOBJ_SITE, site_name.c_str());
+        if (site_id == -1)
+            throw std::runtime_error("Site '" + site_name + "' not found");
+
+        // Get position from d_->site_xpos (3 values per site)
+        // Note: Use site_xpos for sites, xpos is for bodies
+        int pos_idx = 3 * site_id;
+        DQ p = d_->site_xpos[pos_idx] * i_ +
+               d_->site_xpos[pos_idx + 1] * j_ +
+               d_->site_xpos[pos_idx + 2] * k_;
+
+        // Get orientation from d_->site_xquat (4 values per site: w, x, y, z)
+        int quat_idx = 4 * site_id;
+        DQ r = DQ(d_->xquat[quat_idx],      // w
+                  d_->xquat[quat_idx + 1],  // x
+                  d_->xquat[quat_idx + 2],  // y
+                  d_->xquat[quat_idx + 3]); // z
+        r = r.normalize();  // Ensure it's a unit quaternion
+
+        // Return the dual quaternion pose: r + 0.5 * ε * p * r
+        return r + 0.5 * E_ * p * r;
     }
 
 
@@ -718,8 +782,8 @@ void DQ_MujocoInterface::set_wireframe_view(const bool &flag)
  *
  * Example usage:
  * @code
- * robot.set_jointframe_view(true);   // Show all joint axes
- * robot.set_jointframe_view(false);  // Hide joint axes
+ * robot.set_joint_view(true);   // Show all joint axes
+ * robot.set_joint_view(false);  // Hide joint axes
  * @endcode
  *
  * @note Joint axes are typically color-coded:
@@ -734,11 +798,30 @@ void DQ_MujocoInterface::set_wireframe_view(const bool &flag)
  * @see set_wireframe_view() for wireframe rendering
  * @see mjVIS_JOINT flag in MuJoCo documentation
  */
-void DQ_MujocoInterface::set_jointframe_view(const bool &flag)
+void DQ_MujocoInterface::set_joint_view(const bool &flag)
 {
     _check_model();
     impl_->opt_.flags[mjVIS_JOINT] = flag ? 1 : 0; // Enable visualization of joint axes
+    // Scale up joint axis visualization for better visibility
+    if (flag) {
+        impl_->m_->vis.scale.framewidth = 0.01;   // Default is ~0.02, makes axes thicker
+        impl_->m_->vis.scale.framelength = 0.1;
+        //impl_->m_->vis.map.force = 0.1;          // Affects force arrow scaling
+    }
 }
+
+void DQ_MujocoInterface::set_contact_view(const bool &flag)
+{
+    _check_model();
+    impl_->opt_.flags[mjVIS_CONTACTFORCE] = flag ? 1 : 0;
+}
+
+void DQ_MujocoInterface::set_center_of_mass_view(const bool &flag)
+{
+    _check_model();
+    impl_->opt_.flags[mjVIS_COM] = flag ? 1 : 0;
+}
+
 
 /**
  * @brief Get current joint positions
@@ -974,6 +1057,23 @@ VectorXd DQ_MujocoInterface::get_joint_forces(const std::vector<std::string>& jo
     for(auto i=0;i<n;i++)
         joint_forces(i)=impl_->_get_joint_force(jointnames.at(i));
     return joint_forces;
+}
+
+DQ DQ_MujocoInterface::get_site_pose(const std::string &objectname) const
+{
+    _check_model();
+    return impl_->_get_site_pose(objectname);
+}
+
+void DQ_MujocoInterface::set_site_pose(const std::string &objectname, const DQ &pose)
+{
+    // For C++20
+    // std::string function_name = static_cast<std::string>(std::source_location::current().function_name());
+    std::string function_name = {"DQ_MujocoInterface::set_site_pose"};
+    if (!is_unit(pose))
+        throw std::runtime_error(function_name + ". The pose must be a unit dual quaternion!");
+    _check_model();
+    impl_->_set_site_pose(objectname, pose);
 }
 
 

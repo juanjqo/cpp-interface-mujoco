@@ -51,11 +51,16 @@ public:
 
     //Visualization tools
     void set_wireframe_view(const bool& flag);
-    void set_jointframe_view(const bool& flag);
+    void set_joint_view(const bool& flag);
+    void set_contact_view(const bool &flag);
+    void set_center_of_mass_view(const bool& flag);
+
+
 
 
     std::vector<std::string> get_joint_names() const;
 
+    // Joint space methods
     VectorXd get_joint_positions(const std::vector<std::string>& jointnames) const;
     void     set_joint_positions(const std::vector<std::string>& jointnames, const VectorXd& angles_rad);
     void     set_joint_target_positions(const std::vector<std::string>& jointnames, const VectorXd& angles_rad);
@@ -63,6 +68,9 @@ public:
     VectorXd get_joint_velocities(const std::vector<std::string>& jointnames) const;
     void     set_joint_target_forces(const std::vector<std::string>& jointnames, const VectorXd& forces);
     VectorXd get_joint_forces(const std::vector<std::string>& jointnames) const;
+
+    DQ get_site_pose(const std::string& objectname) const;
+    void set_site_pose(const std::string& objectname, const DQ& pose);
 
 
     virtual ~DQ_MujocoInterface() = default;
