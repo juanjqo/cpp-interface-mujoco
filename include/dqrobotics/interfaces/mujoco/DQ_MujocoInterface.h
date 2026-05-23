@@ -50,8 +50,22 @@ public:
     void render();
 
     VectorXd get_joint_positions(const std::vector<std::string>& jointnames) const;
+
+
+    void set_joint_positions(const std::vector<std::string>& jointnames,
+                                    const VectorXd& angles_rad);
+
     void set_joint_target_positions(const std::vector<std::string>& jointnames,
                                     const VectorXd& angles_rad);
+
+    void set_joint_target_velocities(const std::vector<std::string>& jointnames,
+                                     const VectorXd& velocities_rad_per_sec);
+    VectorXd get_joint_velocities(const std::vector<std::string>& jointnames) const;
+
+    void set_joint_target_forces(const std::vector<std::string>& jointnames,
+                                 const VectorXd& forces);
+
+    VectorXd get_joint_forces(const std::vector<std::string>& jointnames) const;
 
 
     virtual ~DQ_MujocoInterface() = default;

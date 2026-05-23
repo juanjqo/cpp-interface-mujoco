@@ -18,6 +18,7 @@ int main() {
 
     auto mi = DQ_MujocoInterface();
     mi.load_model("scene.xml");
+    std::vector<std::string> jointnames = {"fr3_joint1", "fr3_joint2","fr3_joint3", "fr3_joint4", "fr3_joint5", "fr3_joint6", "fr3_joint7"};
     while(!mi.should_close_window() && !kill_this_process)
     {
         double simstart = mi.get_simulation_time();
@@ -28,7 +29,13 @@ int main() {
             double value = 0.5 * sin(8.0 * mi.get_simulation_time());
             q_cmd << value, value,value, value,value, value, value;
 
-            mi.set_joint_target_positions({"fr3_joint1", "fr3_joint2","fr3_joint3", "fr3_joint4", "fr3_joint5", "fr3_joint6", "fr3_joint7"}, q_cmd);  //arm_sh0 for Spot arm
+            mi.set_joint_target_positions(jointnames, q_cmd);  //arm_sh0 for Spot arm
+
+            std::cout<<"--------------------------------------"<<std::endl;
+            std::cout<<"q:     "<<mi.get_joint_positions(jointnames).transpose()<<std::endl;
+            std::cout<<"q_dot: "<<mi.get_joint_velocities(jointnames).transpose()<<std::endl;
+            std::cout<<"tau  : "<<mi.get_joint_forces(jointnames).transpose()<<std::endl;
+            std::cout<<"    "<<std::endl;
 
         }
 
