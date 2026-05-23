@@ -52,21 +52,12 @@ public:
     std::vector<std::string> get_joint_names() const;
 
     VectorXd get_joint_positions(const std::vector<std::string>& jointnames) const;
-
-
-    void set_joint_positions(const std::vector<std::string>& jointnames,
-                                    const VectorXd& angles_rad);
-
-    void set_joint_target_positions(const std::vector<std::string>& jointnames,
-                                    const VectorXd& angles_rad);
-
-    void set_joint_target_velocities(const std::vector<std::string>& jointnames,
-                                     const VectorXd& velocities_rad_per_sec);
+    void     set_joint_positions(const std::vector<std::string>& jointnames, const VectorXd& angles_rad);
+    void     set_joint_target_positions(const std::vector<std::string>& jointnames, const VectorXd& angles_rad);
+    void     set_joint_target_velocities(const std::vector<std::string>& jointnames,const VectorXd& velocities_rad_per_sec);
     VectorXd get_joint_velocities(const std::vector<std::string>& jointnames) const;
 
-    void set_joint_target_forces(const std::vector<std::string>& jointnames,
-                                 const VectorXd& forces);
-
+    void     set_joint_target_forces(const std::vector<std::string>& jointnames, const VectorXd& forces);
     VectorXd get_joint_forces(const std::vector<std::string>& jointnames) const;
 
 
