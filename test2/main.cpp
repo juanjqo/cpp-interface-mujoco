@@ -18,7 +18,9 @@ int main() {
 
     auto mi = DQ_MujocoInterface();
     mi.load_model("scene.xml");
-    std::vector<std::string> jointnames = {"fr3_joint1", "fr3_joint2","fr3_joint3", "fr3_joint4", "fr3_joint5", "fr3_joint6", "fr3_joint7"};
+    //td::vector<std::string> jointnames = {"fr3_joint1", "fr3_joint2","fr3_joint3", "fr3_joint4", "fr3_joint5", "fr3_joint6", "fr3_joint7"};
+    std::vector<std::string> jointnames = mi.get_joint_names();
+
     while(!mi.should_close_window() && !kill_this_process)
     {
         double simstart = mi.get_simulation_time();

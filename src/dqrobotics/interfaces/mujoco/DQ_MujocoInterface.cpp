@@ -402,6 +402,28 @@ public:
 
 
     /**
+     * @brief Get names of all joints in the model
+     * @return Vector of joint names
+     *
+     * Returns the names of all joints defined in the MuJoCo model.
+     * The order of joint names corresponds to the joint indices in MuJoCo.
+     */
+    std::vector<std::string> _get_joint_names() const
+    {
+        std::vector<std::string> names;
+        names.reserve(m_->njnt);  // Pre-allocate memory for efficiency
+
+        for (int i = 0; i < m_->njnt; i++)
+        {
+            // MuJoCo stores joint names in the 'names' array with offsets
+            const char* joint_name = m_->names + m_->name_jntadr[i];
+            names.push_back(std::string(joint_name));
+        }
+        return names;
+    }
+
+
+    /**
      * @brief _get_joint_position
      * @param jointname Name of the joint to query
      * @return Current joint position in radians (revolute) or meters (prismatic)
@@ -431,6 +453,48 @@ public:
     }
 
 
+
+    /**
+     * @brief _set_joint_position
+     * @param jointname Name of the joint to set
+     * @param angle_rad Desired joint position in radians (revolute) or meters (prismatic)
+     *
+     * Directly sets the joint position in the simulation state by writing to d_->qpos.
+     * This completely bypasses MuJoCo's physics engine, actuators, and controllers.
+     *
+     * @warning This method teleports the joint to the desired position instantly,
+     *          ignoring any physical laws, constraints, or actuator limits.
+     *          Use this ONLY for:
+     *          - Initializing the robot to a starting configuration
+     *          - Resetting the simulation to a known state
+     *          - Debugging or testing purposes
+     *          - Teleporting objects without dynamics
+     *
+     * @warning Using this during active control will override any actuator
+     *          commands and may cause unexpected behavior or simulation instability.
+     *
+     * @note This method does NOT generate torques in d_->qfrc_actuator.
+     * @note The change takes effect immediately and will affect subsequent physics steps.
+     *
+     * @see _set_joint_target_position() for proper dynamic position control
+     * @see _set_joint_target_velocity() for velocity control
+     * @see _set_joint_target_force() for torque control
+     *
+     * Example of appropriate use:
+     * @code
+     * // Initialize robot to home position before simulation starts
+     * _set_joint_position("joint1", 0.0);
+     * _set_joint_position("joint2", 1.57);
+     * @endcode
+     *
+     * Example of inappropriate use:
+     * @code
+     * // DO NOT use for control during simulation - this bypasses physics!
+     * while(simulating) {
+     *     _set_joint_position("joint1", target_position);  // WRONG!
+     * }
+     * @endcode
+     */
     void _set_joint_position(const std::string& jointname, const double& angle_rad)
     {
         int qpos_adr = m_->jnt_qposadr[_get_handle_from_map(jointname)];
@@ -734,4 +798,32 @@ VectorXd DQ_MujocoInterface::get_joint_forces(const std::vector<std::string>& jo
     return joint_forces;
 }
 
+
+/**
+ * @brief Get names of all joints in the loaded model
+ * @return Vector containing the names of all joints
+ *
+ * Returns the names of all joints defined in the MuJoCo XML model.
+ * The order of joint names corresponds to the joint indices in MuJoCo.
+ *
+ * Example usage:
+ * @code
+ * DQ_MujocoInterface robot;
+ * robot.load_model("robot.xml");
+ * std::vector<std::string> all_joints = robot.get_joint_names();
+ * std::cout << "Robot has " << all_joints.size() << " joints:" << std::endl;
+ * for (const auto& joint : all_joints) {
+ *     std::cout << "  - " << joint << std::endl;
+ * }
+ * @endcode
+ *
+ * @note This method is useful for discovering available joints without
+ *       manually specifying them from the XML file.
+ * @see get_number_of_joints() for getting just the count
+ */
+std::vector<std::string> DQ_MujocoInterface::get_joint_names() const
+{
+    _check_model();
+    return impl_->_get_joint_names();
+}
 

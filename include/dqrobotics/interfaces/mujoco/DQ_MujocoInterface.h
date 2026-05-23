@@ -49,6 +49,8 @@ public:
     bool should_close_window() const;
     void render();
 
+    std::vector<std::string> get_joint_names() const;
+
     VectorXd get_joint_positions(const std::vector<std::string>& jointnames) const;
 
 
