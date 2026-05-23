@@ -666,6 +666,39 @@ void DQ_MujocoInterface::render()
     impl_->render();
 }
 
+/**
+ * @brief Get current joint positions
+ * @param jointnames Vector of joint names to query
+ * @return VectorXd containing the current positions of the specified joints
+ *
+ * Returns the actual joint positions from the simulation state (d_->qpos).
+ * These values reflect the current physical positions after all dynamics,
+ * constraints, and control actions have been applied.
+ *
+ * For different joint types:
+ * - Revolute joints: Position in radians (range typically -π to π or continuous)
+ * - Prismatic joints: Position in meters
+ *
+ * The order of returned values matches the order of joint names in the input vector.
+ *
+ * Example usage:
+ * @code
+ * std::vector<std::string> joints = {"joint1", "joint2", "joint3"};
+ * VectorXd positions = robot.get_joint_positions(joints);
+ * std::cout << "Current positions: " << positions.transpose() << std::endl;
+ *
+ * // Get individual joint position
+ * double joint1_pos = robot.get_joint_positions({"joint1"})(0);
+ * @endcode
+ *
+ * @note This method reads the actual state after physics simulation
+ * @note Use set_joint_target_positions() to command new positions
+ * @note Use set_joint_positions() to teleport positions (bypasses physics)
+ *
+ * @see get_joint_velocities() for reading velocities
+ * @see get_joint_forces() for reading applied forces/torques
+ * @see set_joint_target_positions() for commanding positions with dynamics
+ */
 VectorXd DQ_MujocoInterface::get_joint_positions(const std::vector<std::string> &jointnames) const
 {
     _check_model();
@@ -676,6 +709,42 @@ VectorXd DQ_MujocoInterface::get_joint_positions(const std::vector<std::string> 
     return joint_positions;
 }
 
+
+/**
+ * @brief Get current joint velocities
+ * @param jointnames Vector of joint names to query
+ * @return VectorXd containing the current velocities of the specified joints
+ *
+ * Returns the actual joint velocities from the simulation state (d_->qvel).
+ * These values reflect the current physical velocities after all dynamics,
+ * constraints, and control actions have been applied.
+ *
+ * For different joint types:
+ * - Revolute joints: Angular velocity in radians per second (rad/s)
+ * - Prismatic joints: Linear velocity in meters per second (m/s)
+ *
+ * The order of returned values matches the order of joint names in the input vector.
+ *
+ * Example usage:
+ * @code
+ * std::vector<std::string> joints = {"joint1", "joint2", "joint3"};
+ * VectorXd velocities = robot.get_joint_velocities(joints);
+ * std::cout << "Current velocities: " << velocities.transpose() << " rad/s" << std::endl;
+ *
+ * // Check if robot is moving
+ * if (robot.get_joint_velocities(joints).norm() < 0.01) {
+ *     std::cout << "Robot is stationary" << std::endl;
+ * }
+ * @endcode
+ *
+ * @note Velocities are used by MuJoCo's controllers for damping calculations
+ * @note In position control mode, the damping term is: -kv * actual_velocity
+ * @note Positive velocity indicates motion in the positive joint direction
+ *
+ * @see get_joint_positions() for reading positions
+ * @see get_joint_forces() for reading applied forces/torques
+ * @see set_joint_target_velocities() for commanding velocities with dynamics
+ */
 VectorXd DQ_MujocoInterface::get_joint_velocities(const std::vector<std::string>& jointnames) const
 {
     _check_model();
@@ -688,13 +757,48 @@ VectorXd DQ_MujocoInterface::get_joint_velocities(const std::vector<std::string>
 
 
 /**
- * @brief Directly set joint positions (teleportation, no dynamics)
+ * @brief Directly set joint positions (teleportation, bypasses physics)
  * @param jointnames Vector of joint names
- * @param angles_rad Vector of desired joint positions
+ * @param angles_rad Vector of desired joint positions (radians or meters)
  *
- * @warning This bypasses physics and actuators completely. Use for initialization
- *          or debugging only, not for control during simulation.
- * @see set_joint_target_positions() for proper dynamic control
+ * This method teleports the specified joints to the desired positions
+ * instantly, completely bypassing MuJoCo's physics engine and actuators.
+ * No dynamics, constraints, or actuator limits are applied.
+ *
+ * @warning This method is NOT suitable for real-time control during simulation.
+ *          Use set_joint_target_positions() instead for proper dynamic control.
+ *
+ * Appropriate use cases:
+ * - Initializing robot pose before simulation starts
+ * - Resetting simulation to a known configuration
+ * - Debugging or testing specific joint configurations
+ * - Positioning objects without simulating motion
+ *
+ * Inappropriate use cases:
+ * - Real-time feedback control
+ * - Testing controller performance
+ * - Any scenario where realistic physics is required
+ *
+ * Example:
+ * @code
+ * std::vector<std::string> joints = {"shoulder", "elbow", "wrist"};
+ * VectorXd home_pos(3);
+ * home_pos << 0.0, 1.57, 0.0;
+ *
+ * // Initialize robot to home position at start
+ * robot.set_joint_positions(joints, home_pos);
+ *
+ * // Then use dynamic control during simulation
+ * while(simulating) {
+ *     robot.set_joint_target_positions(joints, desired_positions);
+ *     robot.trigger_next_simulation_step();
+ * }
+ * @endcode
+ *
+ * @note The simulation will continue from this teleported state in the next step
+ * @see set_joint_target_positions() for dynamic position control with physics
+ * @see set_joint_target_velocities() for dynamic velocity control
+ * @see set_joint_target_forces() for direct torque control
  */
 void DQ_MujocoInterface::set_joint_positions(const std::vector<std::string>& jointnames,
                                                     const VectorXd& angles_rad)
