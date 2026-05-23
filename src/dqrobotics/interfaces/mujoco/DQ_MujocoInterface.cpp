@@ -401,18 +401,58 @@ public:
         return qvel_[qvel_adr];
     }
 
+    /**
+     * @brief _set_joint_position
+     * @param jointname
+     * @param angle_rad
+     */
     void _set_joint_position(const std::string& jointname, const double& angle_rad)
     {
         int qpos_adr = m_->jnt_qposadr[_get_handle_from_map(jointname)];
         d_->qpos[qpos_adr] = angle_rad;
     }
 
+    /**
+     * @brief _set_joint_target_position
+     * @param jointname Name of the joint to control
+     * @param angle_rad Target position in radians
+     *
+     * When using a position actuator (type="position" in XML), MuJoCo's built-in
+     * PD controller computes the applied torque as:
+     *
+     *     torque = kp * (target_position - actual_position) - kv * actual_velocity
+     *
+     * Where:
+     *   - target_position = d_->ctrl[actuator_id] (set by this method)
+     *   - actual_position = d_->qpos (current joint position)
+     *   - actual_velocity = d_->qvel (current joint velocity)
+     *   - kp = position gain from XML actuator definition
+     *   - kv = velocity gain from XML actuator definition
+     *
+     * The computed torque is applied to the joint and stored in d_->qfrc_actuator.
+     *
+     * @note This method enables smooth, physically-realistic motion with proper
+     *       dynamics, unlike set_joint_position() which teleports the joint.
+     *
+     * @see set_joint_position() for direct position control without dynamics
+     */
     void _set_joint_target_position(const std::string& jointname, const double& angle_rad)
     {
         int actuator_id = get_actuator_handle_from_joint(jointname);
         d_->ctrl[actuator_id] = angle_rad;
     }
 
+
+    /**
+     * @brief _set_joint_target_velocity
+     * @param jointname Name of the joint to control
+     * @param velocity_rad_per_sec Target velocity in rad/s
+     *
+     * For velocity actuators, MuJoCo computes:
+     *     torque = kv * (target_velocity - actual_velocity)
+     *
+     * Where kv is the velocity gain from the XML actuator definition.
+     */
     void _set_joint_target_velocity(const std::string& jointname, const double& velocity_rad_per_sec)
     {
         int actuator_id = get_actuator_handle_from_joint(jointname);
@@ -420,6 +460,16 @@ public:
     }
 
 
+    /**
+     * @brief _set_joint_target_force
+     * @param jointname Name of the joint to control
+     * @param force_nm Target torque in Nm
+     *
+     * For torque actuators, MuJoCo applies the torque directly:
+     *     torque = target_force
+     *
+     * No PD controller is used; the commanded torque is applied directly.
+     */
     void _set_joint_target_force(const std::string& jointname, const double& force_nm)
     {
         int actuator_id = get_actuator_handle_from_joint(jointname);
@@ -427,6 +477,37 @@ public:
     }
 
 
+    /**
+     * @brief _get_joint_force
+     * @param jointname Name of the joint to query
+     * @return Applied force/torque in Newtons (for prismatic joints) or Newton-meters (for revolute joints)
+     *
+     * Returns the actual force/torque currently being applied to the joint by the actuator.
+     * This value is computed by MuJoCo's actuator controller during mj_step() and stored
+     * in d_->qfrc_actuator.
+     *
+     * For different actuator types, this represents:
+     *   - Position actuator: The torque computed by the PD controller
+     *     torque = kp * (target_position - actual_position) - kv * actual_velocity
+     *
+     *   - Velocity actuator: The torque computed by the velocity controller
+     *     torque = kv * (target_velocity - actual_velocity)
+     *
+     *   - Torque actuator: The directly commanded torque
+     *     torque = target_force (clamped to ctrlrange if specified)
+     *
+     * This value represents the actual effort being applied to the joint and can be used for:
+     *   - Monitoring actuator saturation
+     *   - Implementing torque limits or safety checks
+     *   - Feedforward control compensation
+     *   - Analyzing control performance
+     *
+     * @note The force/torque value is positive in the positive joint direction
+     * @note This reflects the actual applied force after any limits (ctrlrange, actuator limits)
+     * @see set_joint_target_forces() for commanding torques directly
+     * @see set_joint_target_positions() for position-based control that generates torques
+     * @see set_joint_target_velocities() for velocity-based control that generates torques
+     */
     double _get_joint_force(const std::string& jointname)
     {
         int joint_id = _get_handle_from_map(jointname);
@@ -537,6 +618,27 @@ void DQ_MujocoInterface::set_joint_target_forces(const std::vector<std::string>&
 }
 
 
+/**
+ * @brief get_joint_forces
+ * @param jointnames Vector of joint names to query
+ * @return VectorXd containing the applied forces/torques for all specified joints
+ *
+ * Returns the actual forces/torques currently being applied to the specified joints
+ * by their respective actuators. The order of returned values matches the order
+ * of joint names in the input vector.
+ *
+ * Example usage:
+ * @code
+ * std::vector<std::string> joints = {"joint1", "joint2", "joint3"};
+ * VectorXd torques = robot.get_joint_forces(joints);
+ * std::cout << "Joint torques: " << torques.transpose() << std::endl;
+ * @endcode
+ *
+ * @note Forces are in Newtons (prismatic joints), torques in Newton-meters (revolute joints)
+ * @see set_joint_target_forces()
+ * @see get_joint_positions()
+ * @see get_joint_velocities()
+ */
 VectorXd DQ_MujocoInterface::get_joint_forces(const std::vector<std::string>& jointnames) const
 {
     _check_model();
