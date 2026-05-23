@@ -1,14 +1,8 @@
-#include "mujoco/mujoco.h"
-#include <iostream>
-#include <thread>
-#include <iostream>
-#include <memory>
 #include "dqrobotics/interfaces/mujoco/DQ_MujocoInterface.h"
 
 /*********************************************
  * SIGNAL HANDLER
  * *******************************************/
-#include<signal.h>
 
 static std::atomic_bool kill_this_process(false);
 
