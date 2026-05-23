@@ -31,5 +31,10 @@ add_library(${PROJECT_NAME}
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     include
-    ${MUJOCO_LIBS}
+    ${MUJOCO_INCLUDE_DIR}  # Changed from MUJOCO_LIBS to MUJOCO_INCLUDE_DIR
+)
+
+target_link_libraries(${PROJECT_NAME}
+    PRIVATE
+    ${TOOL_LIBS}
 )
