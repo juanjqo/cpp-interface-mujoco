@@ -234,6 +234,10 @@ public:
 
         opt_.frame = mjFRAME_SITE;          // Show site frames
 
+        //// bodyframe axis width and length
+        m_->vis.scale.framewidth = 0.05;
+        m_->vis.scale.framelength = 1;
+
         last_time_ = std::chrono::high_resolution_clock::now();
     }
 
@@ -431,12 +435,33 @@ public:
     }
 
     /**
-     * @brief Set the pose of a site (only works for sites attached to worldbody)
-     * @param site_name Name of the site
-     * @param pose New pose as a Dual Quaternion
+     * @brief Set the position and orientation of a site in the simulation
      *
-     * @warning This modifies the model's kinematics. Use sparingly.
-     * @note This is for static repositioning, not dynamic animation.
+     * This function modifies the runtime pose of a site. Sites are kinematic markers
+     * that do not participate in physics or collision detection, making them ideal
+     * for tracking end-effector positions, defining reference frames, or visual debugging.
+     *
+     * The pose is set in the data structure (d_->site_xpos, d_->site_xmat) rather than
+     * the model structure because:
+     * - m_->site_pos is static and loaded from XML (read-only after initialization)
+     * - d_->site_xpos stores the current runtime state that updates each simulation step
+     *
+     * @param site_name The name of the site as defined in the MuJoCo XML file
+     * @param pose The target pose as a Dual Quaternion (DQ) containing:
+     *             - Translation: x, y, z position in world coordinates
+     *             - Rotation: quaternion (w, x, y, z) orientation
+     *
+     * @throws std::runtime_error If site_name is not found in the model
+     *
+     * @note After setting the pose, the change is immediate but may be overwritten
+     *       in the next simulation step if the site is attached to a moving body.
+     *       For static sites (like test_frame), the pose will persist until changed.
+     *
+     * @example
+     *   DQ target_pose;  // Create a dual quaternion
+     *   target_pose.set_translation(0.5, 0.2, 0.3);
+     *   target_pose.set_rotation(1, 0, 0, 0);  // Identity quaternion
+     *   _set_site_pose("test_frame", target_pose);
      */
     void _set_site_pose(const std::string& site_name, const DQ& pose)
     {
@@ -444,30 +469,46 @@ public:
         if (site_id == -1)
             throw std::runtime_error("Site '" + site_name + "' not found");
 
-        // Get position from pose
         VectorXd p = pose.translation().vec3();
         VectorXd r = pose.P().vec4();
 
-        // Set position in model (not data!)
-        m_->site_pos[3 * site_id]     = p(0);
-        m_->site_pos[3 * site_id + 1] = p(1);
-        m_->site_pos[3 * site_id + 2] = p(2);
+        // Set position
+        d_->site_xpos[3 * site_id]     = p(0);
+        d_->site_xpos[3 * site_id + 1] = p(1);
+        d_->site_xpos[3 * site_id + 2] = p(2);
 
-        // Set orientation in model (as quaternion: w, x, y, z)
-        m_->site_quat[4 * site_id]     = r(0);
-        m_->site_quat[4 * site_id + 1] = r(1);
-        m_->site_quat[4 * site_id + 2] = r(2);
-        m_->site_quat[4 * site_id + 3] = r(3);
-
-        // Update kinematics to reflect changes
-        mj_forward(m_, d_);
-
-
+        // Set orientation from quaternion
+        mju_quat2Mat(d_->site_xmat + 9 * site_id, r.data());
 
     }
 
 
 
+    /**
+     * @brief Get the current position and orientation of a site from the simulation
+     *
+     * This function retrieves the runtime pose of a site directly from MuJoCo's
+     * data structure. The returned pose reflects any modifications made by:
+     * - Previous calls to _set_site_pose()
+     * - Physics simulation (if site is attached to a moving body)
+     * - Control system updates
+     *
+     * @param site_name The name of the site as defined in the MuJoCo XML file
+     * @return DQ Dual quaternion containing the site's current pose:
+     *         - Translation: world position (x, y, z)
+     *         - Rotation: quaternion (w, x, y, z) orientation
+     *
+     * @throws std::runtime_error If site_name is not found in the model
+     *
+     * @note This function reads from the data structure, which always contains
+     *       the most up-to-date simulation state.
+     *
+     * @example
+     *   // Get current end-effector pose for control
+     *   DQ current_pose = _get_site_pose("test_frame");
+     *   VectorXd pos = current_pose.translation().vec3();
+     *   std::cout << "Site position: (" << pos(0) << ", " << pos(1) << ", " << pos(2) << ")" << std::endl;
+     */
     DQ _get_site_pose(const std::string& site_name)
     {
         // Get the site ID
@@ -478,9 +519,9 @@ public:
         // Get position from d_->site_xpos (3 values per site)
         // Note: Use site_xpos for sites, xpos is for bodies
         int pos_idx = 3 * site_id;
-        DQ p = d_->site_xpos[pos_idx] * i_ +
-               d_->site_xpos[pos_idx + 1] * j_ +
-               d_->site_xpos[pos_idx + 2] * k_;
+        DQ p = d_->xpos[pos_idx]    * i_ +
+               d_->xpos[pos_idx + 1] * j_ +
+               d_->xpos[pos_idx + 2] * k_;
 
         // Get orientation from d_->site_xquat (4 values per site: w, x, y, z)
         int quat_idx = 4 * site_id;
@@ -802,12 +843,6 @@ void DQ_MujocoInterface::set_joint_view(const bool &flag)
 {
     _check_model();
     impl_->opt_.flags[mjVIS_JOINT] = flag ? 1 : 0; // Enable visualization of joint axes
-    // Scale up joint axis visualization for better visibility
-    if (flag) {
-        impl_->m_->vis.scale.framewidth = 0.01;   // Default is ~0.02, makes axes thicker
-        impl_->m_->vis.scale.framelength = 0.1;
-        //impl_->m_->vis.map.force = 0.1;          // Affects force arrow scaling
-    }
 }
 
 void DQ_MujocoInterface::set_contact_view(const bool &flag)

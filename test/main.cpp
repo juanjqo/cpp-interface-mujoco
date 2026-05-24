@@ -19,8 +19,8 @@ int main() {
     auto mi = DQ_MujocoInterface();
     mi.load_model("ur3e_scene.xml");
 
-    //mi.set_wireframe_view(true);
-    //mi.set_joint_view(true);
+    mi.set_wireframe_view(true);
+    mi.set_joint_view(true);
     //mi.set_contact_view(true);
     //mi.set_center_of_mass_view(true);
 
@@ -33,7 +33,8 @@ int main() {
         while( mi.get_simulation_time() - simstart < 1.0/60.0 )
         {
             mi.trigger_next_simulation_step();
-            double value = 0.2 * sin(8.0 * mi.get_simulation_time());
+            double t = mi.get_simulation_time();
+            double value = 0.2 * sin(8.0 * t);
             VectorXd q_cmd = VectorXd::Constant(n, value);
             mi.set_joint_target_positions(jointnames, q_cmd);  //arm_sh0 for Spot arm
 
@@ -44,7 +45,10 @@ int main() {
             std::cout<<"    "<<std::endl;
             double phi = M_PI/4;
 
-            DQ r = cos(phi/2) + k_*sin(phi/2);
+            DQ n =  i_*cos(t) + j_*sin(t);
+            n = n.normalize();
+
+            DQ r = cos(phi/2) + n*sin(phi/2);
             DQ x = r + 0.5*E_*(value*i_ + 0.5*k_)*r;
             mi.set_site_pose("test_frame", x);
             DQ test_frame = mi.get_site_pose("test_frame");
