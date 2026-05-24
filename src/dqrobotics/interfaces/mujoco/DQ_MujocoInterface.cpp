@@ -503,6 +503,8 @@ public:
      * @note This function reads from the data structure, which always contains
      *       the most up-to-date simulation state.
      *
+     *       <site name="test_frame" type="sphere" size="0.05" rgba="1 0 0 0.5" pos="0 0 0"/>
+     *
      * @example
      *   // Get current end-effector pose for control
      *   DQ current_pose = _get_site_pose("test_frame");
