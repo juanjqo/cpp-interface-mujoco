@@ -19,8 +19,8 @@ int main() {
     auto mi = DQ_MujocoInterface();
     mi.load_model("ur3e_scene.xml");
 
-    mi.set_wireframe_view(true);
-    mi.set_joint_view(true);
+    //mi.set_wireframe_view(true);
+    //mi.set_joint_view(true);
     //mi.set_contact_view(true);
     //mi.set_center_of_mass_view(true);
 
