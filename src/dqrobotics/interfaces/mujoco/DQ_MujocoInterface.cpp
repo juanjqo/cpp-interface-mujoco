@@ -777,6 +777,7 @@ bool DQ_MujocoInterface::should_close_window() const
 
 void DQ_MujocoInterface::render()
 {
+    //if (!impl_->window_) return;  // Add safety check
     _check_model();
     impl_->render();
 }
@@ -1140,5 +1141,28 @@ std::vector<std::string> DQ_MujocoInterface::get_joint_names() const
 {
     _check_model();
     return impl_->_get_joint_names();
+}
+
+
+/**
+ * @brief Reset simulation to initial state
+ *
+ * Resets all simulation state variables (joint positions, velocities, actuator states,
+ * contact forces, and simulation time) to the initial conditions defined in the XML model.
+ *
+ * @throws std::runtime_error If no model is loaded
+ *
+ * @warning This instantly teleports the robot without dynamics. Use only for resetting
+ *          experiments or recovering from invalid states, not during active control.
+ *
+ * @see load_model() for loading initial configuration
+ * @see set_joint_positions() for teleporting to specific configurations
+ */
+void DQ_MujocoInterface::reset_simulation() {
+    _check_model();
+    mj_resetData(impl_->m_, impl_->d_);
+    // Update Eigen maps to reflect reset state
+    impl_->qpos_ = Eigen::Map<Eigen::VectorXd>(impl_->d_->qpos, impl_->m_->nq);
+    impl_->qvel_ = Eigen::Map<Eigen::VectorXd>(impl_->d_->qvel, impl_->m_->nv);
 }
 

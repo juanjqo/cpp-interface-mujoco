@@ -56,6 +56,9 @@ public:
     void set_center_of_mass_view(const bool& flag);
 
 
+    void reset_simulation();
+
+
 
 
     std::vector<std::string> get_joint_names() const;
