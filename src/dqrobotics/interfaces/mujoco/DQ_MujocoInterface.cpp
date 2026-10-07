@@ -105,8 +105,6 @@ public:
 public:
     //std::thread render_thread_;
     //std::atomic<bool> render_loop_started_{false};
-    VectorXd qpos_;
-    VectorXd qvel_;
     std::unordered_map<std::string, int> handles_map_; //
     std::unordered_map<std::string, int> actuator_map_; // actuator handles
 
@@ -181,8 +179,8 @@ public:
 
          // make data corresponding to model
         d_ = mj_makeData(m_);
-        qpos_ = Eigen::Map<Eigen::VectorXd>(d_->qpos, m_->nq);
-        qvel_ = Eigen::Map<Eigen::VectorXd>(d_->qvel, m_->nv);
+        // compute derived quantities (body/site poses, etc.) for the initial state
+        mj_forward(m_, d_);
         initialize(1280, 920, "test");
         model_loaded_ = true;
     }
@@ -321,10 +319,6 @@ public:
         if (!m_ || !d_)
             throw std::runtime_error("Model or data not initialized");
         mj_step(m_, d_);
-        //mj_forward(m_, d_);
-        //d_->qpos[0] = 0.5 * sin(2.0 * d_->time);
-        qpos_ = Eigen::Map<Eigen::VectorXd>(d_->qpos, m_->nq);
-        qvel_ = Eigen::Map<Eigen::VectorXd>(d_->qvel, m_->nv);
         //------------------------------------------------------------
 
         auto end = std::chrono::high_resolution_clock::now();
@@ -441,10 +435,12 @@ public:
      * that do not participate in physics or collision detection, making them ideal
      * for tracking end-effector positions, defining reference frames, or visual debugging.
      *
-     * The pose is set in the data structure (d_->site_xpos, d_->site_xmat) rather than
-     * the model structure because:
-     * - m_->site_pos is static and loaded from XML (read-only after initialization)
-     * - d_->site_xpos stores the current runtime state that updates each simulation step
+     * MuJoCo recomputes d_->site_xpos and d_->site_xmat from the model (m_->site_pos,
+     * m_->site_quat) on every mj_step(), so writing only to mjData would be overwritten
+     * one step later. This method therefore:
+     * - converts the desired world pose into the frame of the site's parent body and
+     *   writes it to m_->site_pos / m_->site_quat, so it persists across steps
+     * - also writes d_->site_xpos / d_->site_xmat so the change is visible immediately
      *
      * @param site_name The name of the site as defined in the MuJoCo XML file
      * @param pose The target pose as a Dual Quaternion (DQ) containing:
@@ -453,9 +449,9 @@ public:
      *
      * @throws std::runtime_error If site_name is not found in the model
      *
-     * @note After setting the pose, the change is immediate but may be overwritten
-     *       in the next simulation step if the site is attached to a moving body.
-     *       For static sites (like test_frame), the pose will persist until changed.
+     * @note The pose is stored relative to the parent body. For sites in the worldbody
+     *       (like test_frame) it stays fixed in the world until changed. For sites attached
+     *       to a moving body, it follows that body after the next simulation step.
      *
      * @example
      *   DQ target_pose;  // Create a dual quaternion
@@ -472,14 +468,23 @@ public:
         VectorXd p = pose.translation().vec3();
         VectorXd r = pose.P().vec4();
 
-        // Set position
+        // Express the desired world pose in the frame of the parent body:
+        // local = inverse(body_pose) * world_pose
+        int body_id = m_->site_bodyid[site_id];
+        mjtNum body_inv_pos[3], body_inv_quat[4];
+        mju_negPose(body_inv_pos, body_inv_quat, d_->xpos + 3 * body_id, d_->xquat + 4 * body_id);
+        mju_mulPose(m_->site_pos + 3 * site_id, m_->site_quat + 4 * site_id,
+                    body_inv_pos, body_inv_quat, p.data(), r.data());
+
+        // Sites declared at the body origin are flagged by the compiler to copy the body frame
+        // and ignore site_pos/site_quat. Force MuJoCo to use the values written above.
+        m_->site_sameframe[site_id] = mjSAMEFRAME_NONE;
+
+        // Update the runtime state so the new pose is visible before the next step
         d_->site_xpos[3 * site_id]     = p(0);
         d_->site_xpos[3 * site_id + 1] = p(1);
         d_->site_xpos[3 * site_id + 2] = p(2);
-
-        // Set orientation from quaternion
         mju_quat2Mat(d_->site_xmat + 9 * site_id, r.data());
-
     }
 
 
@@ -520,17 +525,13 @@ public:
 
         // Get position from d_->site_xpos (3 values per site)
         // Note: Use site_xpos for sites, xpos is for bodies
-        int pos_idx = 3 * site_id;
-        DQ p = d_->xpos[pos_idx]    * i_ +
-               d_->xpos[pos_idx + 1] * j_ +
-               d_->xpos[pos_idx + 2] * k_;
+        const mjtNum* xpos = d_->site_xpos + 3 * site_id;
+        DQ p = xpos[0] * i_ + xpos[1] * j_ + xpos[2] * k_;
 
-        // Get orientation from d_->site_xquat (4 values per site: w, x, y, z)
-        int quat_idx = 4 * site_id;
-        DQ r = DQ(d_->xquat[quat_idx],      // w
-                  d_->xquat[quat_idx + 1],  // x
-                  d_->xquat[quat_idx + 2],  // y
-                  d_->xquat[quat_idx + 3]); // z
+        // mjData stores site orientations only as rotation matrices (site_xmat, 9 values per site)
+        mjtNum quat[4]; // w, x, y, z
+        mju_mat2Quat(quat, d_->site_xmat + 9 * site_id);
+        DQ r = DQ(quat[0], quat[1], quat[2], quat[3]);
         r = r.normalize();  // Ensure it's a unit quaternion
 
         // Return the dual quaternion pose: r + 0.5 * ε * p * r
@@ -549,7 +550,7 @@ public:
     double   _get_joint_position(const std::string& jointname)
     {
         int qpos_adr = m_->jnt_qposadr[_get_handle_from_map(jointname)];
-        return qpos_[qpos_adr];
+        return d_->qpos[qpos_adr];
     }
 
 
@@ -564,7 +565,7 @@ public:
     double _get_joint_velocity(const std::string& jointname)
     {
         int qvel_adr = m_->jnt_dofadr[_get_handle_from_map(jointname)];
-        return qvel_[qvel_adr];
+        return d_->qvel[qvel_adr];
     }
 
 
@@ -728,9 +729,9 @@ public:
      */
     double _get_joint_force(const std::string& jointname)
     {
-        int joint_id = _get_handle_from_map(jointname);
-        // qfrc_actuator contains the forces generated by actuators
-        return d_->qfrc_actuator[joint_id];
+        int dof_adr = m_->jnt_dofadr[_get_handle_from_map(jointname)];
+        // qfrc_actuator (size nv) contains the forces generated by actuators, indexed by DoF
+        return d_->qfrc_actuator[dof_adr];
     }
 
 
@@ -1001,6 +1002,8 @@ void DQ_MujocoInterface::set_joint_positions(const std::vector<std::string>& joi
     _check_model();
     for(std::size_t i=0;i<jointnames.size();i++)
         impl_->_set_joint_position(jointnames.at(i), angles_rad(i));
+    // update body/site poses, etc. to match the new joint positions
+    mj_forward(impl_->m_, impl_->d_);
 }
 
 
@@ -1161,8 +1164,7 @@ std::vector<std::string> DQ_MujocoInterface::get_joint_names() const
 void DQ_MujocoInterface::reset_simulation() {
     _check_model();
     mj_resetData(impl_->m_, impl_->d_);
-    // Update Eigen maps to reflect reset state
-    impl_->qpos_ = Eigen::Map<Eigen::VectorXd>(impl_->d_->qpos, impl_->m_->nq);
-    impl_->qvel_ = Eigen::Map<Eigen::VectorXd>(impl_->d_->qvel, impl_->m_->nv);
+    // update body/site poses, etc. to match the reset state
+    mj_forward(impl_->m_, impl_->d_);
 }
 
