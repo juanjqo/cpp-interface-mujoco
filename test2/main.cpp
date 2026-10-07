@@ -40,11 +40,7 @@ int main() {
             std::cout<<"    "<<std::endl;
 
         }
-
         //std::cout<<"q: "<<mi.get_joint_positions({"arm_sh0"}).transpose()<<std::endl;
-
-
-
         mi.render();
     }
     return 0;

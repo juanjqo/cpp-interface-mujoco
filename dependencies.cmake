@@ -4,7 +4,7 @@ endif()
 
 include(FetchContent)
 
-set(MUJOCO_VERSION "3.8.1")
+set(MUJOCO_VERSION "3.9.0")
 
 # Prevent MuJoCo from creating Eigen3::Eigen target
 set(MUJOCO_TEST_PYTHON_UTIL OFF CACHE BOOL "Disable Python util to prevent Eigen3 target" FORCE)
