@@ -28,22 +28,45 @@ Contributors:
 #pragma once
 #include <dqrobotics/DQ.h>
 #include <memory>
+#include <string>
+#include <vector>
 
-
-using namespace DQ_robotics;
-using namespace Eigen;
+namespace DQ_robotics
+{
 
 class DQ_MujocoInterface
 {
 public:
-    DQ_MujocoInterface();
+    /**
+     * @brief How the simulation is visualized.
+     *  WINDOW:   load_model() opens a window, and render() draws the scene in it.
+     *  HEADLESS: no window is opened and render() does nothing. Use it to run simulations
+     *            without a display (e.g., automated tests, CI, or batch experiments).
+     */
+    enum class RENDERING
+    {
+        WINDOW,
+        HEADLESS
+    };
+
+    /**
+     * @brief DQ_MujocoInterface
+     * @param rendering WINDOW (default) or HEADLESS.
+     * @param window_title Title of the window. If empty, the name of the model is used.
+     * @param window_width Width of the window in screen coordinates.
+     * @param window_height Height of the window in screen coordinates.
+     */
+    explicit DQ_MujocoInterface(const RENDERING& rendering = RENDERING::WINDOW,
+                                const std::string& window_title = "",
+                                const int& window_width = 1280,
+                                const int& window_height = 920);
     DQ_MujocoInterface(const DQ_MujocoInterface&) = delete;
     DQ_MujocoInterface& operator= (const DQ_MujocoInterface&) = delete;
 
     void load_model(const std::string& xml_model);
 
 
-    void trigger_next_simulation_step() const;
+    void trigger_next_simulation_step();
     double get_simulation_time() const;
 
     bool should_close_window() const;
@@ -64,25 +87,26 @@ public:
     std::vector<std::string> get_joint_names() const;
 
     // Joint space methods
-    VectorXd get_joint_positions(const std::vector<std::string>& jointnames) const;
-    void     set_joint_positions(const std::vector<std::string>& jointnames, const VectorXd& angles_rad);
-    void     set_joint_target_positions(const std::vector<std::string>& jointnames, const VectorXd& angles_rad);
-    void     set_joint_target_velocities(const std::vector<std::string>& jointnames,const VectorXd& velocities_rad_per_sec);
-    VectorXd get_joint_velocities(const std::vector<std::string>& jointnames) const;
-    void     set_joint_target_forces(const std::vector<std::string>& jointnames, const VectorXd& forces);
-    VectorXd get_joint_forces(const std::vector<std::string>& jointnames) const;
+    Eigen::VectorXd get_joint_positions(const std::vector<std::string>& jointnames) const;
+    void            set_joint_positions(const std::vector<std::string>& jointnames, const Eigen::VectorXd& angles_rad);
+    void            set_joint_target_positions(const std::vector<std::string>& jointnames, const Eigen::VectorXd& angles_rad);
+    void            set_joint_target_velocities(const std::vector<std::string>& jointnames,const Eigen::VectorXd& velocities_rad_per_sec);
+    Eigen::VectorXd get_joint_velocities(const std::vector<std::string>& jointnames) const;
+    void            set_joint_target_forces(const std::vector<std::string>& jointnames, const Eigen::VectorXd& forces);
+    Eigen::VectorXd get_joint_forces(const std::vector<std::string>& jointnames) const;
 
     DQ get_site_pose(const std::string& objectname) const;
     void set_site_pose(const std::string& objectname, const DQ& pose);
 
 
-    virtual ~DQ_MujocoInterface() = default;
+    virtual ~DQ_MujocoInterface();
 private:
     class Impl;
-    std::shared_ptr<Impl> impl_;
+    std::unique_ptr<Impl> impl_;
     const std::string error_msg_layout_ = "Bad call in DQ_MujocoInterface::";
     void _check_model() const;
 
 
 };
 
+}

@@ -1,33 +1,17 @@
-cmake_minimum_required(VERSION 3.16...3.28)
+# Built from the top-level CMakeLists.txt (DQ_MUJOCO_BUILD_TESTS=ON)
 
-project(dqrobotics-interface-mujoco-tests LANGUAGES CXX)
-
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
-
-# Only the MuJoCo library is needed: skip its own tests, samples and simulate app
-set(MUJOCO_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(MUJOCO_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(MUJOCO_BUILD_SIMULATE OFF CACHE BOOL "" FORCE)
-include(../dependencies.cmake)
-
-include_directories(${CMAKE_SOURCE_DIR}/../include/)
-add_library(dqrobotics-interface-mujoco
-    ${CMAKE_SOURCE_DIR}/../src/dqrobotics/interfaces/mujoco/DQ_MujocoInterface.cpp
-)
-target_link_libraries(dqrobotics-interface-mujoco
-    dqrobotics
-    mujoco::mujoco
-    ${TOOL_LIBS}
+# The tests run inside a copy of the models, so files that MuJoCo writes (e.g., MUJOCO_LOG.TXT)
+# stay in the build directory
+add_custom_target(copy_test_models
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/models ${CMAKE_CURRENT_BINARY_DIR}/models
 )
 
 add_executable(test_interface test_interface.cpp)
-target_link_libraries(test_interface dqrobotics-interface-mujoco)
+# GLFW is linked directly because one test checks the GLFW error state
+target_link_libraries(test_interface PRIVATE dqrobotics::interface-mujoco glfw)
+add_dependencies(test_interface copy_test_models)
 
 # Each test runs in its own process, so a crash in one does not hide the others
-enable_testing()
 set(TESTS
     joint_positions_readable_after_set
     size_mismatch_throws
@@ -41,17 +25,23 @@ set(TESTS
     load_model_twice
     destroy_without_loading
     two_interfaces_at_once
+    headless_mode_needs_no_display
 )
 foreach(test_name IN LISTS TESTS)
     add_test(NAME ${test_name}
              COMMAND test_interface ${test_name}
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/models)
+             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/models)
 endforeach()
+
+# Prove that HEADLESS mode never touches the display
+set_tests_properties(headless_mode_needs_no_display PROPERTIES
+    ENVIRONMENT_MODIFICATION "DISPLAY=unset:;WAYLAND_DISPLAY=unset:"
+)
 
 # Undefined behavior in the destructor does not always crash, so also check it with valgrind
 find_program(VALGRIND valgrind)
 if(VALGRIND)
     add_test(NAME destroy_without_loading_valgrind
              COMMAND ${VALGRIND} -q --error-exitcode=1 $<TARGET_FILE:test_interface> destroy_without_loading
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/models)
+             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/models)
 endif()

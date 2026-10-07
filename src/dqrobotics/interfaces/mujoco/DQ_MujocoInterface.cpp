@@ -40,6 +40,11 @@ Contributors:
 }
 
 
+namespace DQ_robotics
+{
+
+using namespace Eigen;
+
 class DQ_MujocoInterface::Impl
 {
 public:
@@ -123,6 +128,12 @@ public:
 
     GLFWwindow* window_ = nullptr;
 
+    // Window settings
+    RENDERING rendering_{RENDERING::WINDOW};
+    std::string window_title_;
+    int window_width_{1280};
+    int window_height_{920};
+
     // GLFW is process-wide: it is initialized by the first interface that opens a window
     // and terminated only when the last one is destroyed.
     inline static std::mutex glfw_mutex_;
@@ -153,8 +164,14 @@ public:
     /**
      * @brief Impl
      */
-    Impl()
+    Impl(const RENDERING& rendering, const std::string& window_title,
+         const int& window_width, const int& window_height)
+        : rendering_(rendering), window_title_(window_title),
+          window_width_(window_width), window_height_(window_height)
     {
+        if (window_width <= 0 || window_height <= 0)
+            throw std::invalid_argument("The window width and height must be positive");
+
         // Give the visualization structures a valid empty state, so that they can be
         // freed safely even if no model is ever loaded.
         mjv_defaultCamera(&cam_);
@@ -259,7 +276,16 @@ public:
 
         // compute derived quantities (body/site poses, etc.) for the initial state
         mj_forward(m_, d_);
-        initialize(1280, 920, "test");
+        if (rendering_ == RENDERING::WINDOW)
+        {
+            // Use the model name (<mujoco model="...">) when no title was given
+            std::string title = window_title_;
+            if (title.empty())
+                title = m_->names;  // the model name is the first entry of the names buffer
+            if (title.empty())
+                title = "DQ_MujocoInterface";
+            initialize(window_width_, window_height_, title);
+        }
         model_loaded_ = true;
     }
 
@@ -853,10 +879,16 @@ void check_vector_size(const std::vector<std::string>& jointnames, const VectorX
 }
 
 
-DQ_MujocoInterface::DQ_MujocoInterface()
+DQ_MujocoInterface::DQ_MujocoInterface(const RENDERING& rendering,
+                                       const std::string& window_title,
+                                       const int& window_width,
+                                       const int& window_height)
 {
-    impl_ = std::make_shared<DQ_MujocoInterface::Impl>();
+    impl_ = std::make_unique<DQ_MujocoInterface::Impl>(rendering, window_title, window_width, window_height);
 }
+
+// Defined here, where Impl is a complete type (required by std::unique_ptr<Impl>)
+DQ_MujocoInterface::~DQ_MujocoInterface() = default;
 
 void DQ_MujocoInterface::_check_model() const
 {
@@ -873,7 +905,7 @@ void DQ_MujocoInterface::load_model(const std::string &xml_model)
 
 
 
-void DQ_MujocoInterface::trigger_next_simulation_step() const
+void DQ_MujocoInterface::trigger_next_simulation_step()
 {
     _check_model();
     impl_->step_simulation();
@@ -885,16 +917,28 @@ double DQ_MujocoInterface::get_simulation_time() const
     return impl_->d_->time;
 }
 
+/**
+ * @brief Check whether the user asked to close the window
+ * @return true if the window was closed. Always false in HEADLESS mode.
+ */
 bool DQ_MujocoInterface::should_close_window() const
 {
     _check_model();
+    if (!impl_->window_)
+        return false;
     return glfwWindowShouldClose(impl_->window_);
 }
 
+/**
+ * @brief Draw the current state of the simulation in the window
+ *
+ * In HEADLESS mode this does nothing, so the same simulation loop works in both modes.
+ */
 void DQ_MujocoInterface::render()
 {
-    //if (!impl_->window_) return;  // Add safety check
     _check_model();
+    if (!impl_->window_)
+        return;
     impl_->render();
 }
 
@@ -1286,3 +1330,4 @@ void DQ_MujocoInterface::reset_simulation() {
     impl_->reset();
 }
 
+} // namespace DQ_robotics

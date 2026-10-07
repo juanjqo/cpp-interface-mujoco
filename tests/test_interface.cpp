@@ -6,8 +6,9 @@ Each test is a function registered in tests_. Run all of them with
 or a single one (this is how CTest calls them) with
     ./test_interface <test_name>
 
-The tests must run from the tests/models directory, and they need a display because
-load_model() opens a window (on a headless machine, use xvfb-run).
+The tests must run from the directory that contains the test models (CTest does this).
+Most tests run in HEADLESS mode. The ones that check the window (load_model_twice,
+two_interfaces_at_once) need a display; on a headless machine, use xvfb-run.
 */
 
 #include "dqrobotics/interfaces/mujoco/DQ_MujocoInterface.h"
@@ -16,6 +17,11 @@ load_model() opens a window (on a headless machine, use xvfb-run).
 #include <functional>
 #include <iostream>
 #include <map>
+
+using namespace DQ_robotics;
+using namespace Eigen;
+
+static constexpr auto HEADLESS = DQ_MujocoInterface::RENDERING::HEADLESS;
 
 /*********************************************
  * MINIMAL TEST HELPERS
@@ -67,7 +73,7 @@ static DQ test_pose()
 
 static void joint_positions_readable_after_set()
 {
-    DQ_MujocoInterface mi;
+    DQ_MujocoInterface mi(HEADLESS);
     mi.load_model("test_scene.xml");
     // No simulation step in between: the values must be visible immediately
     mi.set_joint_positions({"hinge", "hinge2"}, vec({0.3, -0.7}));
@@ -78,7 +84,7 @@ static void joint_positions_readable_after_set()
 
 static void size_mismatch_throws()
 {
-    DQ_MujocoInterface mi;
+    DQ_MujocoInterface mi(HEADLESS);
     mi.load_model("test_scene.xml");
     const std::vector<std::string> joints = {"hinge", "hinge2"};
     CHECK_THROWS(std::invalid_argument, mi.set_joint_positions(joints, vec({0.1})));
@@ -89,7 +95,7 @@ static void size_mismatch_throws()
 
 static void site_follows_moving_body()
 {
-    DQ_MujocoInterface mi;
+    DQ_MujocoInterface mi(HEADLESS);
     mi.load_model("test_scene.xml");
     // "tip" is 0.3 m along the x axis of the arm, which rotates about z at height 0.5
     mi.set_joint_positions({"hinge"}, vec({M_PI/2}));
@@ -101,7 +107,7 @@ static void site_follows_moving_body()
 
 static void set_site_pose_on_worldbody_persists()
 {
-    DQ_MujocoInterface mi;
+    DQ_MujocoInterface mi(HEADLESS);
     mi.load_model("test_scene.xml");
     // "world_site" is declared at the body origin, which MuJoCo flags as "same frame as the body"
     const DQ x = test_pose();
@@ -114,7 +120,7 @@ static void set_site_pose_on_worldbody_persists()
 
 static void set_site_pose_on_moving_body()
 {
-    DQ_MujocoInterface mi;
+    DQ_MujocoInterface mi(HEADLESS);
     mi.load_model("test_scene.xml");
     mi.set_joint_positions({"hinge"}, vec({0.4}));
     const DQ x = test_pose();
@@ -133,7 +139,7 @@ static void set_site_pose_on_moving_body()
 
 static void joint_force_with_free_joint()
 {
-    DQ_MujocoInterface mi;
+    DQ_MujocoInterface mi(HEADLESS);
     mi.load_model("test_scene.xml");
     // "hinge" has joint id 1 but DoF address 6, because the free joint before it has 6 DoFs
     mi.set_joint_target_forces({"hinge"}, vec({3.0}));
@@ -143,7 +149,7 @@ static void joint_force_with_free_joint()
 
 static void actuator_lookup_ignores_tendon_actuators()
 {
-    DQ_MujocoInterface mi;
+    DQ_MujocoInterface mi(HEADLESS);
     mi.load_model("test_scene.xml");
     // The first actuator drives tendon 1, and "hinge" is joint 1. The command must reach
     // "hinge_motor", not "tendon_motor" (which would push on hinge2 through the tendon).
@@ -155,7 +161,7 @@ static void actuator_lookup_ignores_tendon_actuators()
 
 static void load_error_includes_mujoco_message()
 {
-    DQ_MujocoInterface mi;
+    DQ_MujocoInterface mi(HEADLESS);
     try
     {
         mi.load_model("malformed.xml");
@@ -172,7 +178,7 @@ static void load_error_includes_mujoco_message()
 
 static void reset_restores_joints_and_sites()
 {
-    DQ_MujocoInterface mi;
+    DQ_MujocoInterface mi(HEADLESS);
     mi.load_model("test_scene.xml");
     const DQ site0 = mi.get_site_pose("world_site");
 
@@ -189,6 +195,7 @@ static void reset_restores_joints_and_sites()
 
 static void load_model_twice()
 {
+    // Windowed, to check that the window and render context are reused for the new model
     DQ_MujocoInterface mi;
     mi.load_model("test_scene.xml");
     mi.get_joint_positions({"hinge"});  // caches the handle of "hinge"
@@ -207,6 +214,19 @@ static void destroy_without_loading()
     // initialized. Reading uninitialized memory is undefined behavior, so a regression may not
     // crash every time; run this test under valgrind to check it thoroughly.
     DQ_MujocoInterface mi;
+}
+
+static void headless_mode_needs_no_display()
+{
+    // CTest runs this test without DISPLAY and WAYLAND_DISPLAY, so opening a window would fail
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("test_scene.xml");
+    mi.set_joint_target_positions({"hinge2"}, vec({0.5}));
+    for (int i = 0; i < 100; i++)
+        mi.trigger_next_simulation_step();
+    mi.render();  // does nothing
+    CHECK(!mi.should_close_window());
+    CHECK(mi.get_joint_positions({"hinge2"})(0) > 0.0);  // the servo moved the joint
 }
 
 static void two_interfaces_at_once()
@@ -251,6 +271,7 @@ int main(int argc, char** argv)
         {"load_model_twice", load_model_twice},
         {"destroy_without_loading", destroy_without_loading},
         {"two_interfaces_at_once", two_interfaces_at_once},
+        {"headless_mode_needs_no_display", headless_mode_needs_no_display},
     };
 
     std::vector<std::string> selected;

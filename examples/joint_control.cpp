@@ -14,6 +14,9 @@ Run it from the directory that contains manipulator.xml (the build copies it nex
 #include <csignal>
 #include <iostream>
 
+using namespace DQ_robotics;
+using namespace Eigen;
+
 /*********************************************
  * SIGNAL HANDLER
  * *******************************************/

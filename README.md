@@ -1,5 +1,7 @@
 # cpp-interface-mujoco
 
+[![CI](https://github.com/juanjqo/cpp-interface-mujoco/actions/workflows/ci.yml/badge.svg)](https://github.com/juanjqo/cpp-interface-mujoco/actions/workflows/ci.yml)
+
 An unofficial [DQ Robotics](https://dqrobotics.github.io) interface for C++17 to interact with [MuJoCo](https://mujoco.org).
 
 It wraps a MuJoCo model and viewer behind an API that mirrors `DQ_CoppeliaSimInterface`, so controllers written with
@@ -13,6 +15,8 @@ DQ Robotics can drive a MuJoCo simulation using joint names and dual-quaternion 
 - Task space: get and set the pose of any site as a unit dual quaternion
 - Visualization toggles: wireframe, joint axes, contact forces, center of mass
 - Simulation reset
+- Headless mode (no window) for automated tests, CI and batch experiments
+- CMake package: `find_package(dqrobotics-interface-mujoco)` and the target `dqrobotics::interface-mujoco`
 
 ## Dependencies
 
@@ -40,22 +44,28 @@ brew install cmake eigen glfw
 
 Then build and install [DQ Robotics C++](https://github.com/dqrobotics/cpp) from source.
 
-## Build and run the examples
+## Build
 
 ```bash
 mkdir -p ~/git && cd ~/git && git clone https://github.com/juanjqo/cpp-interface-mujoco.git
 ```
 
 ```bash
-cd ~/git/cpp-interface-mujoco/examples && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+cd ~/git/cpp-interface-mujoco && cmake -S . -B build && cmake --build build -j
+```
+
+This builds the library, the examples and the tests (in Release mode, unless `CMAKE_BUILD_TYPE` is given). The first
+configure downloads and compiles MuJoCo, so it takes a few minutes. To build only the library, add
+`-DDQ_MUJOCO_BUILD_EXAMPLES=OFF -DDQ_MUJOCO_BUILD_TESTS=OFF`.
+
+### Examples
+
+```bash
+cd ~/git/cpp-interface-mujoco/build/examples && ./joint_control
 ```
 
 ```bash
-cd ~/git/cpp-interface-mujoco/examples/build && ./joint_control
-```
-
-```bash
-cd ~/git/cpp-interface-mujoco/examples/build && ./site_poses
+cd ~/git/cpp-interface-mujoco/build/examples && ./site_poses
 ```
 
 | Example | What it shows |
@@ -63,28 +73,41 @@ cd ~/git/cpp-interface-mujoco/examples/build && ./site_poses
 | [`joint_control`](examples/joint_control.cpp) | Sinusoidal joint references tracked by position actuators; prints joint positions, velocities and torques |
 | [`site_poses`](examples/site_poses.cpp) | Moves a free-standing `target` frame with `set_site_pose` and reads the `end_effector` frame with `get_site_pose` |
 
-The first configure downloads and compiles MuJoCo, so it takes a few minutes. The examples use
-[`examples/models/manipulator.xml`](examples/models/manipulator.xml), a generic 6-DoF arm built from primitive shapes
-(no mesh files), which is copied next to the executables at build time.
+The examples use [`examples/models/manipulator.xml`](examples/models/manipulator.xml), a generic 6-DoF arm built from
+primitive shapes (no mesh files), which is copied next to the executables at build time.
 
-## Tests
-
-```bash
-cd ~/git/cpp-interface-mujoco/tests && cmake -S . -B build && cmake --build build -j
-```
+### Tests
 
 ```bash
-cd ~/git/cpp-interface-mujoco/tests/build && ctest --output-on-failure
+cd ~/git/cpp-interface-mujoco && ctest --test-dir build --output-on-failure
 ```
 
-The tests use small models in `tests/models` and open a window, so they need a display. On a headless machine
-(e.g. CI), run them with `xvfb-run ctest --output-on-failure`. If valgrind is installed, an extra test checks the
-destructor for reads of uninitialized memory.
+Most tests run in headless mode. The two that check the window need a display; on a headless machine, run
+`xvfb-run -a -s "-screen 0 1280x1024x24" ctest --test-dir build --output-on-failure`, as the
+[CI workflow](.github/workflows/ci.yml) does. If valgrind is installed, an extra test checks the destructor for reads
+of uninitialized memory.
+
+### Install and use from another project
+
+```bash
+cd ~/git/cpp-interface-mujoco && sudo cmake --install build
+```
+
+This installs the library, its header, and MuJoCo (which it depends on) to `/usr/local`; use `--prefix <dir>` to
+install elsewhere. Then, in your project's `CMakeLists.txt`:
+
+```cmake
+find_package(dqrobotics-interface-mujoco REQUIRED)
+target_link_libraries(my_app PRIVATE dqrobotics::interface-mujoco)
+```
 
 ## Usage
 
 ```cpp
 #include <dqrobotics/interfaces/mujoco/DQ_MujocoInterface.h>
+
+using namespace DQ_robotics;
+using namespace Eigen;
 
 int main()
 {
@@ -113,6 +136,17 @@ int main()
     }
 }
 ```
+
+### Window and headless mode
+
+```cpp
+DQ_MujocoInterface windowed;  // opens a 1280x920 window titled with the model name
+DQ_MujocoInterface custom(DQ_MujocoInterface::RENDERING::WINDOW, "My simulation", 1920, 1080);
+DQ_MujocoInterface headless(DQ_MujocoInterface::RENDERING::HEADLESS);  // no window, no display needed
+```
+
+In headless mode, `render()` does nothing and `should_close_window()` always returns `false`, so the same simulation
+loop works in both modes.
 
 ### Joint commands and actuators
 
@@ -151,10 +185,11 @@ Site frames are drawn in the viewer by default.
 
 | Method | Description |
 |---|---|
-| `load_model(xml)` | Load an MJCF file and open the viewer window |
+| `DQ_MujocoInterface(rendering, title, width, height)` | All arguments are optional (default: a 1280x920 window titled with the model name) |
+| `load_model(xml)` | Load an MJCF file and open the viewer window (unless headless). Can be called again to switch models |
 | `trigger_next_simulation_step()` | Advance the simulation by one timestep (`mj_step`) |
 | `get_simulation_time()` | Simulation time in seconds |
-| `render()` / `should_close_window()` | Draw a frame and process window events / check whether the window was closed |
+| `render()` / `should_close_window()` | Draw a frame and process window events / check whether the window was closed (no-op / `false` when headless) |
 | `reset_simulation()` | Reset the state to the model's initial configuration |
 | `get_joint_names()` | Names of all joints in the model |
 | `get_joint_positions/velocities/forces(names)` | Joint state and actuator forces (`qfrc_actuator`) |
@@ -165,4 +200,4 @@ Site frames are drawn in the viewer by default.
 
 ## License
 
-LGPL. See [LICENSE](LICENSE). The robot models keep their original licenses (see the `LICENSE` file in each model folder).
+[LGPL-3.0-or-later](LICENSE), like [DQ Robotics](https://github.com/dqrobotics/cpp).
