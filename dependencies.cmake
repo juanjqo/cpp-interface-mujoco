@@ -4,6 +4,11 @@ endif()
 
 include(FetchContent)
 
+# Only the MuJoCo library is needed: skip its own tests, samples and simulate app
+set(MUJOCO_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(MUJOCO_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(MUJOCO_BUILD_SIMULATE OFF CACHE BOOL "" FORCE)
+
 set(MUJOCO_VERSION "3.9.0")
 
 # Prevent MuJoCo from creating Eigen3::Eigen target

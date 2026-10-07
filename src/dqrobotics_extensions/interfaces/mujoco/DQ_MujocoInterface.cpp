@@ -25,8 +25,10 @@ Contributors:
 */
 
 #include <chrono>
-#include <dqrobotics/interfaces/mujoco/DQ_MujocoInterface.h>
+#include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h>
 #include <unordered_map>
+#include <mutex>
+#include <algorithm>
 //#include <thread>
 #include "mujoco/mujoco.h"
 #include "GLFW/glfw3.h"
@@ -37,6 +39,12 @@ Contributors:
     fprintf(stderr, "GLFW Error %d: %s\n", error, description);
 }
 
+
+namespace DQ_robotics_extensions
+{
+
+using namespace DQ_robotics;
+using namespace Eigen;
 
 class DQ_MujocoInterface::Impl
 {
@@ -105,8 +113,6 @@ public:
 public:
     //std::thread render_thread_;
     //std::atomic<bool> render_loop_started_{false};
-    VectorXd qpos_;
-    VectorXd qvel_;
     std::unordered_map<std::string, int> handles_map_; //
     std::unordered_map<std::string, int> actuator_map_; // actuator handles
 
@@ -122,6 +128,24 @@ public:
     mjrContext con_;                     // custom GPU context
 
     GLFWwindow* window_ = nullptr;
+
+    // Window settings
+    RENDERING rendering_{RENDERING::WINDOW};
+    std::string window_title_;
+    int window_width_{1280};
+    int window_height_{920};
+
+    // GLFW is process-wide: it is initialized by the first interface that opens a window
+    // and terminated only when the last one is destroyed.
+    inline static std::mutex glfw_mutex_;
+    inline static int glfw_users_{0};
+    bool glfw_acquired_{false};
+
+    // Site poses defined in the XML. set_site_pose() modifies the model, so these are
+    // used to restore the original poses in reset().
+    std::vector<mjtNum> site_pos0_;
+    std::vector<mjtNum> site_quat0_;
+    std::vector<mjtByte> site_sameframe0_;
 
     // Mouse state
     bool button_left_ = false;
@@ -141,27 +165,77 @@ public:
     /**
      * @brief Impl
      */
-    Impl()
+    Impl(const RENDERING& rendering, const std::string& window_title,
+         const int& window_width, const int& window_height)
+        : rendering_(rendering), window_title_(window_title),
+          window_width_(window_width), window_height_(window_height)
     {
-        std::cerr<<"DQ_MujocoInterface::Impl ctor"<<std::endl;
-        model_loaded_ = false;
+        if (window_width <= 0 || window_height <= 0)
+            throw std::invalid_argument("The window width and height must be positive");
+
+        // Give the visualization structures a valid empty state, so that they can be
+        // freed safely even if no model is ever loaded.
+        mjv_defaultCamera(&cam_);
+        mjv_defaultOption(&opt_);
+        mjv_defaultScene(&scn_);
+        mjr_defaultContext(&con_);
     };
 
     /**
      * @brief ~Impl() Destructor of the class
      */
     ~Impl(){
-        std::cerr<<"DQ_MujocoInterface::Impl destroyed"<<std::endl;
-        // close GLFW, free visualization storage
-        // Cleanup GLFW
+        // free visualization storage while the window (and its OpenGL context) still exists
+        _free_visualization();
+
+        // close the window, and GLFW if this is the last interface using it
         if (window_) glfwDestroyWindow(window_);
-        glfwTerminate();
-        mjv_freeScene(&scn_);
-        mjr_freeContext(&con_);
+        _release_glfw();
 
         //free MuJoCo model and data
         if (d_) mj_deleteData(d_);
         if (m_) mj_deleteModel(m_);
+    }
+
+    /**
+     * @brief _acquire_glfw initializes GLFW if no other interface has done it yet.
+     */
+    void _acquire_glfw()
+    {
+        if (glfw_acquired_)
+            return;
+        std::lock_guard<std::mutex> lock(glfw_mutex_);
+        if (glfw_users_ == 0 && !glfwInit())
+            throw std::runtime_error("Error in glfwInit()");
+        glfw_users_++;
+        glfw_acquired_ = true;
+    }
+
+    /**
+     * @brief _release_glfw terminates GLFW if this is the last interface using it.
+     */
+    void _release_glfw()
+    {
+        if (!glfw_acquired_)
+            return;
+        std::lock_guard<std::mutex> lock(glfw_mutex_);
+        if (--glfw_users_ == 0)
+            glfwTerminate();
+        glfw_acquired_ = false;
+    }
+
+    /**
+     * @brief _free_visualization frees the scene and the GPU context.
+     */
+    void _free_visualization()
+    {
+        if (window_)
+        {
+            // mjr_freeContext releases OpenGL resources, so it needs this window's context
+            glfwMakeContextCurrent(window_);
+            mjr_freeContext(&con_);
+        }
+        mjv_freeScene(&scn_);
     }
 
     /**
@@ -172,48 +246,91 @@ public:
     {
         if (xml_model.empty())
             throw std::invalid_argument("xml model path cannot be empty");
-        xml_model_ = xml_model;
         // load model from file and check for errors
-        char error[1000];
-        m_ = mj_loadXML(xml_model.c_str(), NULL, error, 1000);
-        if (!m_)
-            throw std::runtime_error("Wrong xml model!");
+        char error[1000] = "";
+        mjModel* m = mj_loadXML(xml_model.c_str(), NULL, error, sizeof(error));
+        if (!m)
+            throw std::runtime_error("Failed to load the xml model \"" + xml_model + "\": " + error);
 
          // make data corresponding to model
-        d_ = mj_makeData(m_);
-        qpos_ = Eigen::Map<Eigen::VectorXd>(d_->qpos, m_->nq);
-        qvel_ = Eigen::Map<Eigen::VectorXd>(d_->qvel, m_->nv);
-        initialize(1280, 920, "test");
+        mjData* d = mj_makeData(m);
+        if (!d)
+        {
+            mj_deleteModel(m);
+            throw std::runtime_error("Failed to allocate the data for the xml model \"" + xml_model + "\"");
+        }
+
+        // The new model is valid: release the previous one, if any
+        model_loaded_ = false;
+        _free_visualization();
+        if (d_) mj_deleteData(d_);
+        if (m_) mj_deleteModel(m_);
+        handles_map_.clear();
+        actuator_map_.clear();
+
+        m_ = m;
+        d_ = d;
+        xml_model_ = xml_model;
+        site_pos0_.assign(m_->site_pos, m_->site_pos + 3 * m_->nsite);
+        site_quat0_.assign(m_->site_quat, m_->site_quat + 4 * m_->nsite);
+        site_sameframe0_.assign(m_->site_sameframe, m_->site_sameframe + m_->nsite);
+
+        // compute derived quantities (body/site poses, etc.) for the initial state
+        mj_forward(m_, d_);
+        if (rendering_ == RENDERING::WINDOW)
+        {
+            // Use the model name (<mujoco model="...">) when no title was given
+            std::string title = window_title_;
+            if (title.empty())
+                title = m_->names;  // the model name is the first entry of the names buffer
+            if (title.empty())
+                title = "DQ_MujocoInterface";
+            initialize(window_width_, window_height_, title);
+        }
         model_loaded_ = true;
     }
 
     /**
-     * @brief initialize
+     * @brief reset resets the simulation state and the site poses to those defined in the XML.
+     */
+    void reset()
+    {
+        mj_resetData(m_, d_);
+        std::copy(site_pos0_.begin(), site_pos0_.end(), m_->site_pos);
+        std::copy(site_quat0_.begin(), site_quat0_.end(), m_->site_quat);
+        std::copy(site_sameframe0_.begin(), site_sameframe0_.end(), m_->site_sameframe);
+        // update body/site poses, etc. to match the reset state
+        mj_forward(m_, d_);
+    }
+
+    /**
+     * @brief initialize opens the window (only the first time) and creates the scene and
+     *        GPU context for the current model.
      * @param width
      * @param height
      * @param title
      */
     void initialize(const int &width, const int &height, const std::string& title)
     {
-        if (!glfwInit())
-            throw std::runtime_error("Error in glfwInit()");
-        window_ =  glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
-        if (window_ == nullptr)
-            throw std::runtime_error("Error in window()");
+        if (!window_)
+        {
+            _acquire_glfw();
+            window_ =  glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
+            if (window_ == nullptr)
+                throw std::runtime_error("Error in window()");
 
-        // Store this pointer for callbacks
-        glfwSetWindowUserPointer(window_, this);
+            // Store this pointer for callbacks
+            glfwSetWindowUserPointer(window_, this);
 
+            glfwMakeContextCurrent(window_);
+            glfwSwapInterval(1); // Enable vsync
+
+            // Set callbacks using static wrapper functions
+            glfwSetMouseButtonCallback(window_, &Impl::mouse_button_callback);
+            glfwSetCursorPosCallback(window_, &Impl::mouse_move_callback);
+            glfwSetScrollCallback(window_, &Impl::scroll_callback);
+        }
         glfwMakeContextCurrent(window_);
-        glfwSwapInterval(1); // Enable vsync
-
-        // Set callbacks using static wrapper functions
-        glfwSetMouseButtonCallback(window_, &Impl::mouse_button_callback);
-        glfwSetCursorPosCallback(window_, &Impl::mouse_move_callback);
-        glfwSetScrollCallback(window_, &Impl::scroll_callback);
-
-
-
 
         // Reduce geometry quality
         //opt_.quality = mjQUALITY_LOW;       // Lowest quality settings
@@ -261,6 +378,9 @@ public:
      */
     void render()
     {
+        // render into this interface's window (several interfaces may be open)
+        glfwMakeContextCurrent(window_);
+
         // get framebuffer viewport
         mjrRect viewport = {0, 0, 0, 0};
         glfwGetFramebufferSize(window_, &viewport.width, &viewport.height);
@@ -321,10 +441,6 @@ public:
         if (!m_ || !d_)
             throw std::runtime_error("Model or data not initialized");
         mj_step(m_, d_);
-        //mj_forward(m_, d_);
-        //d_->qpos[0] = 0.5 * sin(2.0 * d_->time);
-        qpos_ = Eigen::Map<Eigen::VectorXd>(d_->qpos, m_->nq);
-        qvel_ = Eigen::Map<Eigen::VectorXd>(d_->qvel, m_->nv);
         //------------------------------------------------------------
 
         auto end = std::chrono::high_resolution_clock::now();
@@ -384,8 +500,9 @@ public:
      * @return Actuator index in the range [0, m_->nu)
      * @throws std::runtime_error if joint has no actuator
      *
-     * @note MuJoCo's actuator_trnid array stores the joint/body ID for each actuator.
-     *       The mapping is: actuator_trnid[2*i] = joint_id for actuator i
+     * @note MuJoCo's actuator_trnid array stores the transmission target ID for each actuator
+     *       (a joint, tendon, site or body ID, depending on actuator_trntype). For joint
+     *       actuators, the mapping is: actuator_trnid[2*i] = joint_id for actuator i
      */
     int get_actuator_handle_from_joint(const std::string& jointname)
     {
@@ -399,7 +516,9 @@ public:
 
         // Search for actuator associated with this joint
         for (int i = 0; i < m_->nu; i++) {
-            if (m_->actuator_trnid[2 * i] == joint_id) {
+            const int trntype = m_->actuator_trntype[i];
+            const bool acts_on_joint = (trntype == mjTRN_JOINT || trntype == mjTRN_JOINTINPARENT);
+            if (acts_on_joint && m_->actuator_trnid[2 * i] == joint_id) {
                 actuator_id = i;
                 break;
             }
@@ -441,10 +560,12 @@ public:
      * that do not participate in physics or collision detection, making them ideal
      * for tracking end-effector positions, defining reference frames, or visual debugging.
      *
-     * The pose is set in the data structure (d_->site_xpos, d_->site_xmat) rather than
-     * the model structure because:
-     * - m_->site_pos is static and loaded from XML (read-only after initialization)
-     * - d_->site_xpos stores the current runtime state that updates each simulation step
+     * MuJoCo recomputes d_->site_xpos and d_->site_xmat from the model (m_->site_pos,
+     * m_->site_quat) on every mj_step(), so writing only to mjData would be overwritten
+     * one step later. This method therefore:
+     * - converts the desired world pose into the frame of the site's parent body and
+     *   writes it to m_->site_pos / m_->site_quat, so it persists across steps
+     * - also writes d_->site_xpos / d_->site_xmat so the change is visible immediately
      *
      * @param site_name The name of the site as defined in the MuJoCo XML file
      * @param pose The target pose as a Dual Quaternion (DQ) containing:
@@ -453,9 +574,9 @@ public:
      *
      * @throws std::runtime_error If site_name is not found in the model
      *
-     * @note After setting the pose, the change is immediate but may be overwritten
-     *       in the next simulation step if the site is attached to a moving body.
-     *       For static sites (like test_frame), the pose will persist until changed.
+     * @note The pose is stored relative to the parent body. For sites in the worldbody
+     *       (like test_frame) it stays fixed in the world until changed. For sites attached
+     *       to a moving body, it follows that body after the next simulation step.
      *
      * @example
      *   DQ target_pose;  // Create a dual quaternion
@@ -472,14 +593,23 @@ public:
         VectorXd p = pose.translation().vec3();
         VectorXd r = pose.P().vec4();
 
-        // Set position
+        // Express the desired world pose in the frame of the parent body:
+        // local = inverse(body_pose) * world_pose
+        int body_id = m_->site_bodyid[site_id];
+        mjtNum body_inv_pos[3], body_inv_quat[4];
+        mju_negPose(body_inv_pos, body_inv_quat, d_->xpos + 3 * body_id, d_->xquat + 4 * body_id);
+        mju_mulPose(m_->site_pos + 3 * site_id, m_->site_quat + 4 * site_id,
+                    body_inv_pos, body_inv_quat, p.data(), r.data());
+
+        // Sites declared at the body origin are flagged by the compiler to copy the body frame
+        // and ignore site_pos/site_quat. Force MuJoCo to use the values written above.
+        m_->site_sameframe[site_id] = mjSAMEFRAME_NONE;
+
+        // Update the runtime state so the new pose is visible before the next step
         d_->site_xpos[3 * site_id]     = p(0);
         d_->site_xpos[3 * site_id + 1] = p(1);
         d_->site_xpos[3 * site_id + 2] = p(2);
-
-        // Set orientation from quaternion
         mju_quat2Mat(d_->site_xmat + 9 * site_id, r.data());
-
     }
 
 
@@ -520,17 +650,13 @@ public:
 
         // Get position from d_->site_xpos (3 values per site)
         // Note: Use site_xpos for sites, xpos is for bodies
-        int pos_idx = 3 * site_id;
-        DQ p = d_->xpos[pos_idx]    * i_ +
-               d_->xpos[pos_idx + 1] * j_ +
-               d_->xpos[pos_idx + 2] * k_;
+        const mjtNum* xpos = d_->site_xpos + 3 * site_id;
+        DQ p = xpos[0] * i_ + xpos[1] * j_ + xpos[2] * k_;
 
-        // Get orientation from d_->site_xquat (4 values per site: w, x, y, z)
-        int quat_idx = 4 * site_id;
-        DQ r = DQ(d_->xquat[quat_idx],      // w
-                  d_->xquat[quat_idx + 1],  // x
-                  d_->xquat[quat_idx + 2],  // y
-                  d_->xquat[quat_idx + 3]); // z
+        // mjData stores site orientations only as rotation matrices (site_xmat, 9 values per site)
+        mjtNum quat[4]; // w, x, y, z
+        mju_mat2Quat(quat, d_->site_xmat + 9 * site_id);
+        DQ r = DQ(quat[0], quat[1], quat[2], quat[3]);
         r = r.normalize();  // Ensure it's a unit quaternion
 
         // Return the dual quaternion pose: r + 0.5 * ε * p * r
@@ -549,7 +675,7 @@ public:
     double   _get_joint_position(const std::string& jointname)
     {
         int qpos_adr = m_->jnt_qposadr[_get_handle_from_map(jointname)];
-        return qpos_[qpos_adr];
+        return d_->qpos[qpos_adr];
     }
 
 
@@ -564,7 +690,7 @@ public:
     double _get_joint_velocity(const std::string& jointname)
     {
         int qvel_adr = m_->jnt_dofadr[_get_handle_from_map(jointname)];
-        return qvel_[qvel_adr];
+        return d_->qvel[qvel_adr];
     }
 
 
@@ -728,19 +854,42 @@ public:
      */
     double _get_joint_force(const std::string& jointname)
     {
-        int joint_id = _get_handle_from_map(jointname);
-        // qfrc_actuator contains the forces generated by actuators
-        return d_->qfrc_actuator[joint_id];
+        int dof_adr = m_->jnt_dofadr[_get_handle_from_map(jointname)];
+        // qfrc_actuator (size nv) contains the forces generated by actuators, indexed by DoF
+        return d_->qfrc_actuator[dof_adr];
     }
 
 
 };
 ///------------------------------------------------------------------------------------------------
 
-DQ_MujocoInterface::DQ_MujocoInterface()
+namespace
 {
-    impl_ = std::make_shared<DQ_MujocoInterface::Impl>();
+/**
+ * @brief check_vector_size throws if the vector does not have one value per joint name.
+ */
+void check_vector_size(const std::vector<std::string>& jointnames, const VectorXd& values,
+                       const std::string& function_name)
+{
+    if (static_cast<std::size_t>(values.size()) != jointnames.size())
+        throw std::invalid_argument("Bad call in DQ_MujocoInterface::" + function_name
+                                    + ". Expected a vector of size " + std::to_string(jointnames.size())
+                                    + " (one value per joint name), but got a vector of size "
+                                    + std::to_string(values.size()) + ".");
 }
+}
+
+
+DQ_MujocoInterface::DQ_MujocoInterface(const RENDERING& rendering,
+                                       const std::string& window_title,
+                                       const int& window_width,
+                                       const int& window_height)
+{
+    impl_ = std::make_unique<DQ_MujocoInterface::Impl>(rendering, window_title, window_width, window_height);
+}
+
+// Defined here, where Impl is a complete type (required by std::unique_ptr<Impl>)
+DQ_MujocoInterface::~DQ_MujocoInterface() = default;
 
 void DQ_MujocoInterface::_check_model() const
 {
@@ -757,7 +906,7 @@ void DQ_MujocoInterface::load_model(const std::string &xml_model)
 
 
 
-void DQ_MujocoInterface::trigger_next_simulation_step() const
+void DQ_MujocoInterface::trigger_next_simulation_step()
 {
     _check_model();
     impl_->step_simulation();
@@ -769,16 +918,28 @@ double DQ_MujocoInterface::get_simulation_time() const
     return impl_->d_->time;
 }
 
+/**
+ * @brief Check whether the user asked to close the window
+ * @return true if the window was closed. Always false in HEADLESS mode.
+ */
 bool DQ_MujocoInterface::should_close_window() const
 {
     _check_model();
+    if (!impl_->window_)
+        return false;
     return glfwWindowShouldClose(impl_->window_);
 }
 
+/**
+ * @brief Draw the current state of the simulation in the window
+ *
+ * In HEADLESS mode this does nothing, so the same simulation loop works in both modes.
+ */
 void DQ_MujocoInterface::render()
 {
-    //if (!impl_->window_) return;  // Add safety check
     _check_model();
+    if (!impl_->window_)
+        return;
     impl_->render();
 }
 
@@ -999,8 +1160,11 @@ void DQ_MujocoInterface::set_joint_positions(const std::vector<std::string>& joi
                                                     const VectorXd& angles_rad)
 {
     _check_model();
+    check_vector_size(jointnames, angles_rad, "set_joint_positions");
     for(std::size_t i=0;i<jointnames.size();i++)
         impl_->_set_joint_position(jointnames.at(i), angles_rad(i));
+    // update body/site poses, etc. to match the new joint positions
+    mj_forward(impl_->m_, impl_->d_);
 }
 
 
@@ -1020,6 +1184,7 @@ void DQ_MujocoInterface::set_joint_target_positions(const std::vector<std::strin
                                                     const VectorXd& angles_rad)
 {
     _check_model();
+    check_vector_size(jointnames, angles_rad, "set_joint_target_positions");
     for(std::size_t i=0;i<jointnames.size();i++)
         impl_->_set_joint_target_position(jointnames.at(i), angles_rad(i));
 }
@@ -1040,6 +1205,7 @@ void DQ_MujocoInterface::set_joint_target_velocities(const std::vector<std::stri
                                                      const VectorXd& velocities_rad_per_sec)
 {
     _check_model();
+    check_vector_size(jointnames, velocities_rad_per_sec, "set_joint_target_velocities");
     for(std::size_t i=0;i<jointnames.size();i++)
         impl_->_set_joint_target_velocity(jointnames.at(i), velocities_rad_per_sec(i));
 }
@@ -1061,6 +1227,7 @@ void DQ_MujocoInterface::set_joint_target_forces(const std::vector<std::string>&
                                                  const VectorXd& forces)
 {
     _check_model();
+    check_vector_size(jointnames, forces, "set_joint_target_forces");
     for(std::size_t i=0;i<jointnames.size();i++)
         impl_->_set_joint_target_force(jointnames.at(i), forces(i));
 }
@@ -1149,6 +1316,7 @@ std::vector<std::string> DQ_MujocoInterface::get_joint_names() const
  *
  * Resets all simulation state variables (joint positions, velocities, actuator states,
  * contact forces, and simulation time) to the initial conditions defined in the XML model.
+ * Site poses modified with set_site_pose() are also restored.
  *
  * @throws std::runtime_error If no model is loaded
  *
@@ -1160,9 +1328,7 @@ std::vector<std::string> DQ_MujocoInterface::get_joint_names() const
  */
 void DQ_MujocoInterface::reset_simulation() {
     _check_model();
-    mj_resetData(impl_->m_, impl_->d_);
-    // Update Eigen maps to reflect reset state
-    impl_->qpos_ = Eigen::Map<Eigen::VectorXd>(impl_->d_->qpos, impl_->m_->nq);
-    impl_->qvel_ = Eigen::Map<Eigen::VectorXd>(impl_->d_->qvel, impl_->m_->nv);
+    impl_->reset();
 }
 
+} // namespace DQ_robotics_extensions

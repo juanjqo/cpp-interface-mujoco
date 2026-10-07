@@ -1,0 +1,42 @@
+<mujoco model="test scene">
+  <!--
+    Joint ids: box_free = 0, hinge = 1, hinge2 = 2.
+    The free joint comes first, so joint ids and DoF addresses differ (hinge is DoF 6).
+  -->
+  <!-- implicitfast integrates the actuator damping implicitly, which keeps the stiff servo on the
+       light forearm stable -->
+  <option integrator="implicitfast"/>
+
+  <default>
+    <joint armature="0.01"/>
+  </default>
+
+  <worldbody>
+    <site name="world_site" pos="0 0 0"/>
+    <body name="box" pos="1 1 1">
+      <freejoint name="box_free"/>
+      <geom type="box" size=".05 .05 .05"/>
+    </body>
+    <body name="arm" pos="0 0 0.5">
+      <joint name="hinge" type="hinge" axis="0 0 1"/>
+      <geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.02"/>
+      <site name="tip" pos="0.3 0 0"/>
+      <body name="forearm" pos="0.3 0 0">
+        <joint name="hinge2" type="hinge" axis="0 0 1"/>
+        <geom type="capsule" fromto="0 0 0 0.2 0 0" size="0.02"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <tendon>
+    <fixed name="t0"><joint joint="hinge2" coef="1"/></fixed>
+    <fixed name="t1"><joint joint="hinge2" coef="-1"/></fixed>
+  </tendon>
+
+  <actuator>
+    <!-- Listed first on purpose: its target id (tendon t1 = 1) equals the joint id of "hinge" -->
+    <motor name="tendon_motor" tendon="t1"/>
+    <motor name="hinge_motor" joint="hinge"/>
+    <position name="hinge2_servo" joint="hinge2" kp="50" kv="5"/>
+  </actuator>
+</mujoco>
