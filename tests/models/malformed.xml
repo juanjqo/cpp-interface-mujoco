@@ -1,0 +1,5 @@
+<mujoco model="malformed">
+  <worldbody>
+    <bogus_element name="not_valid"/>
+  </worldbody>
+</mujoco>

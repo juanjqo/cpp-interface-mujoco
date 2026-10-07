@@ -71,6 +71,20 @@ The first configure downloads and compiles MuJoCo, so it takes a few minutes. Th
 [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie) and are copied next to the executable after
 each build.
 
+## Tests
+
+```bash
+cd ~/git/cpp-interface-mujoco/tests && cmake -S . -B build && cmake --build build -j
+```
+
+```bash
+cd ~/git/cpp-interface-mujoco/tests/build && ctest --output-on-failure
+```
+
+The tests use small models in `tests/models` and open a window, so they need a display. On a headless machine
+(e.g. CI), run them with `xvfb-run ctest --output-on-failure`. If valgrind is installed, an extra test checks the
+destructor for reads of uninitialized memory.
+
 ## Usage
 
 ```cpp

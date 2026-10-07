@@ -27,6 +27,8 @@ Contributors:
 #include <chrono>
 #include <dqrobotics/interfaces/mujoco/DQ_MujocoInterface.h>
 #include <unordered_map>
+#include <mutex>
+#include <algorithm>
 //#include <thread>
 #include "mujoco/mujoco.h"
 #include "GLFW/glfw3.h"
@@ -121,6 +123,18 @@ public:
 
     GLFWwindow* window_ = nullptr;
 
+    // GLFW is process-wide: it is initialized by the first interface that opens a window
+    // and terminated only when the last one is destroyed.
+    inline static std::mutex glfw_mutex_;
+    inline static int glfw_users_{0};
+    bool glfw_acquired_{false};
+
+    // Site poses defined in the XML. set_site_pose() modifies the model, so these are
+    // used to restore the original poses in reset().
+    std::vector<mjtNum> site_pos0_;
+    std::vector<mjtNum> site_quat0_;
+    std::vector<mjtByte> site_sameframe0_;
+
     // Mouse state
     bool button_left_ = false;
     bool button_middle_ = false;
@@ -141,25 +155,69 @@ public:
      */
     Impl()
     {
-        std::cerr<<"DQ_MujocoInterface::Impl ctor"<<std::endl;
-        model_loaded_ = false;
+        // Give the visualization structures a valid empty state, so that they can be
+        // freed safely even if no model is ever loaded.
+        mjv_defaultCamera(&cam_);
+        mjv_defaultOption(&opt_);
+        mjv_defaultScene(&scn_);
+        mjr_defaultContext(&con_);
     };
 
     /**
      * @brief ~Impl() Destructor of the class
      */
     ~Impl(){
-        std::cerr<<"DQ_MujocoInterface::Impl destroyed"<<std::endl;
-        // close GLFW, free visualization storage
-        // Cleanup GLFW
+        // free visualization storage while the window (and its OpenGL context) still exists
+        _free_visualization();
+
+        // close the window, and GLFW if this is the last interface using it
         if (window_) glfwDestroyWindow(window_);
-        glfwTerminate();
-        mjv_freeScene(&scn_);
-        mjr_freeContext(&con_);
+        _release_glfw();
 
         //free MuJoCo model and data
         if (d_) mj_deleteData(d_);
         if (m_) mj_deleteModel(m_);
+    }
+
+    /**
+     * @brief _acquire_glfw initializes GLFW if no other interface has done it yet.
+     */
+    void _acquire_glfw()
+    {
+        if (glfw_acquired_)
+            return;
+        std::lock_guard<std::mutex> lock(glfw_mutex_);
+        if (glfw_users_ == 0 && !glfwInit())
+            throw std::runtime_error("Error in glfwInit()");
+        glfw_users_++;
+        glfw_acquired_ = true;
+    }
+
+    /**
+     * @brief _release_glfw terminates GLFW if this is the last interface using it.
+     */
+    void _release_glfw()
+    {
+        if (!glfw_acquired_)
+            return;
+        std::lock_guard<std::mutex> lock(glfw_mutex_);
+        if (--glfw_users_ == 0)
+            glfwTerminate();
+        glfw_acquired_ = false;
+    }
+
+    /**
+     * @brief _free_visualization frees the scene and the GPU context.
+     */
+    void _free_visualization()
+    {
+        if (window_)
+        {
+            // mjr_freeContext releases OpenGL resources, so it needs this window's context
+            glfwMakeContextCurrent(window_);
+            mjr_freeContext(&con_);
+        }
+        mjv_freeScene(&scn_);
     }
 
     /**
@@ -170,15 +228,35 @@ public:
     {
         if (xml_model.empty())
             throw std::invalid_argument("xml model path cannot be empty");
-        xml_model_ = xml_model;
         // load model from file and check for errors
-        char error[1000];
-        m_ = mj_loadXML(xml_model.c_str(), NULL, error, 1000);
-        if (!m_)
-            throw std::runtime_error("Wrong xml model!");
+        char error[1000] = "";
+        mjModel* m = mj_loadXML(xml_model.c_str(), NULL, error, sizeof(error));
+        if (!m)
+            throw std::runtime_error("Failed to load the xml model \"" + xml_model + "\": " + error);
 
          // make data corresponding to model
-        d_ = mj_makeData(m_);
+        mjData* d = mj_makeData(m);
+        if (!d)
+        {
+            mj_deleteModel(m);
+            throw std::runtime_error("Failed to allocate the data for the xml model \"" + xml_model + "\"");
+        }
+
+        // The new model is valid: release the previous one, if any
+        model_loaded_ = false;
+        _free_visualization();
+        if (d_) mj_deleteData(d_);
+        if (m_) mj_deleteModel(m_);
+        handles_map_.clear();
+        actuator_map_.clear();
+
+        m_ = m;
+        d_ = d;
+        xml_model_ = xml_model;
+        site_pos0_.assign(m_->site_pos, m_->site_pos + 3 * m_->nsite);
+        site_quat0_.assign(m_->site_quat, m_->site_quat + 4 * m_->nsite);
+        site_sameframe0_.assign(m_->site_sameframe, m_->site_sameframe + m_->nsite);
+
         // compute derived quantities (body/site poses, etc.) for the initial state
         mj_forward(m_, d_);
         initialize(1280, 920, "test");
@@ -186,32 +264,46 @@ public:
     }
 
     /**
-     * @brief initialize
+     * @brief reset resets the simulation state and the site poses to those defined in the XML.
+     */
+    void reset()
+    {
+        mj_resetData(m_, d_);
+        std::copy(site_pos0_.begin(), site_pos0_.end(), m_->site_pos);
+        std::copy(site_quat0_.begin(), site_quat0_.end(), m_->site_quat);
+        std::copy(site_sameframe0_.begin(), site_sameframe0_.end(), m_->site_sameframe);
+        // update body/site poses, etc. to match the reset state
+        mj_forward(m_, d_);
+    }
+
+    /**
+     * @brief initialize opens the window (only the first time) and creates the scene and
+     *        GPU context for the current model.
      * @param width
      * @param height
      * @param title
      */
     void initialize(const int &width, const int &height, const std::string& title)
     {
-        if (!glfwInit())
-            throw std::runtime_error("Error in glfwInit()");
-        window_ =  glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
-        if (window_ == nullptr)
-            throw std::runtime_error("Error in window()");
+        if (!window_)
+        {
+            _acquire_glfw();
+            window_ =  glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
+            if (window_ == nullptr)
+                throw std::runtime_error("Error in window()");
 
-        // Store this pointer for callbacks
-        glfwSetWindowUserPointer(window_, this);
+            // Store this pointer for callbacks
+            glfwSetWindowUserPointer(window_, this);
 
+            glfwMakeContextCurrent(window_);
+            glfwSwapInterval(1); // Enable vsync
+
+            // Set callbacks using static wrapper functions
+            glfwSetMouseButtonCallback(window_, &Impl::mouse_button_callback);
+            glfwSetCursorPosCallback(window_, &Impl::mouse_move_callback);
+            glfwSetScrollCallback(window_, &Impl::scroll_callback);
+        }
         glfwMakeContextCurrent(window_);
-        glfwSwapInterval(1); // Enable vsync
-
-        // Set callbacks using static wrapper functions
-        glfwSetMouseButtonCallback(window_, &Impl::mouse_button_callback);
-        glfwSetCursorPosCallback(window_, &Impl::mouse_move_callback);
-        glfwSetScrollCallback(window_, &Impl::scroll_callback);
-
-
-
 
         // Reduce geometry quality
         //opt_.quality = mjQUALITY_LOW;       // Lowest quality settings
@@ -259,6 +351,9 @@ public:
      */
     void render()
     {
+        // render into this interface's window (several interfaces may be open)
+        glfwMakeContextCurrent(window_);
+
         // get framebuffer viewport
         mjrRect viewport = {0, 0, 0, 0};
         glfwGetFramebufferSize(window_, &viewport.width, &viewport.height);
@@ -378,8 +473,9 @@ public:
      * @return Actuator index in the range [0, m_->nu)
      * @throws std::runtime_error if joint has no actuator
      *
-     * @note MuJoCo's actuator_trnid array stores the joint/body ID for each actuator.
-     *       The mapping is: actuator_trnid[2*i] = joint_id for actuator i
+     * @note MuJoCo's actuator_trnid array stores the transmission target ID for each actuator
+     *       (a joint, tendon, site or body ID, depending on actuator_trntype). For joint
+     *       actuators, the mapping is: actuator_trnid[2*i] = joint_id for actuator i
      */
     int get_actuator_handle_from_joint(const std::string& jointname)
     {
@@ -393,7 +489,9 @@ public:
 
         // Search for actuator associated with this joint
         for (int i = 0; i < m_->nu; i++) {
-            if (m_->actuator_trnid[2 * i] == joint_id) {
+            const int trntype = m_->actuator_trntype[i];
+            const bool acts_on_joint = (trntype == mjTRN_JOINT || trntype == mjTRN_JOINTINPARENT);
+            if (acts_on_joint && m_->actuator_trnid[2 * i] == joint_id) {
                 actuator_id = i;
                 break;
             }
@@ -738,6 +836,23 @@ public:
 };
 ///------------------------------------------------------------------------------------------------
 
+namespace
+{
+/**
+ * @brief check_vector_size throws if the vector does not have one value per joint name.
+ */
+void check_vector_size(const std::vector<std::string>& jointnames, const VectorXd& values,
+                       const std::string& function_name)
+{
+    if (static_cast<std::size_t>(values.size()) != jointnames.size())
+        throw std::invalid_argument("Bad call in DQ_MujocoInterface::" + function_name
+                                    + ". Expected a vector of size " + std::to_string(jointnames.size())
+                                    + " (one value per joint name), but got a vector of size "
+                                    + std::to_string(values.size()) + ".");
+}
+}
+
+
 DQ_MujocoInterface::DQ_MujocoInterface()
 {
     impl_ = std::make_shared<DQ_MujocoInterface::Impl>();
@@ -1000,6 +1115,7 @@ void DQ_MujocoInterface::set_joint_positions(const std::vector<std::string>& joi
                                                     const VectorXd& angles_rad)
 {
     _check_model();
+    check_vector_size(jointnames, angles_rad, "set_joint_positions");
     for(std::size_t i=0;i<jointnames.size();i++)
         impl_->_set_joint_position(jointnames.at(i), angles_rad(i));
     // update body/site poses, etc. to match the new joint positions
@@ -1023,6 +1139,7 @@ void DQ_MujocoInterface::set_joint_target_positions(const std::vector<std::strin
                                                     const VectorXd& angles_rad)
 {
     _check_model();
+    check_vector_size(jointnames, angles_rad, "set_joint_target_positions");
     for(std::size_t i=0;i<jointnames.size();i++)
         impl_->_set_joint_target_position(jointnames.at(i), angles_rad(i));
 }
@@ -1043,6 +1160,7 @@ void DQ_MujocoInterface::set_joint_target_velocities(const std::vector<std::stri
                                                      const VectorXd& velocities_rad_per_sec)
 {
     _check_model();
+    check_vector_size(jointnames, velocities_rad_per_sec, "set_joint_target_velocities");
     for(std::size_t i=0;i<jointnames.size();i++)
         impl_->_set_joint_target_velocity(jointnames.at(i), velocities_rad_per_sec(i));
 }
@@ -1064,6 +1182,7 @@ void DQ_MujocoInterface::set_joint_target_forces(const std::vector<std::string>&
                                                  const VectorXd& forces)
 {
     _check_model();
+    check_vector_size(jointnames, forces, "set_joint_target_forces");
     for(std::size_t i=0;i<jointnames.size();i++)
         impl_->_set_joint_target_force(jointnames.at(i), forces(i));
 }
@@ -1152,6 +1271,7 @@ std::vector<std::string> DQ_MujocoInterface::get_joint_names() const
  *
  * Resets all simulation state variables (joint positions, velocities, actuator states,
  * contact forces, and simulation time) to the initial conditions defined in the XML model.
+ * Site poses modified with set_site_pose() are also restored.
  *
  * @throws std::runtime_error If no model is loaded
  *
@@ -1163,8 +1283,6 @@ std::vector<std::string> DQ_MujocoInterface::get_joint_names() const
  */
 void DQ_MujocoInterface::reset_simulation() {
     _check_model();
-    mj_resetData(impl_->m_, impl_->d_);
-    // update body/site poses, etc. to match the reset state
-    mj_forward(impl_->m_, impl_->d_);
+    impl_->reset();
 }
 
