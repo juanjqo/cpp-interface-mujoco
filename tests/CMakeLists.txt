@@ -26,6 +26,8 @@ set(TESTS
     destroy_without_loading
     two_interfaces_at_once
     headless_mode_needs_no_display
+    reference_frames_api
+    reference_frames_more_than_scene_capacity
 )
 foreach(test_name IN LISTS TESTS)
     add_test(NAME ${test_name}

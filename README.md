@@ -13,7 +13,8 @@ DQ Robotics can drive a MuJoCo simulation using joint names and dual-quaternion 
 - Joint space: read positions, velocities and actuator forces; teleport joints; command position, velocity or
   torque actuators
 - Task space: get and set the pose of any site as a unit dual quaternion
-- Visualization toggles: wireframe, joint axes, contact forces, center of mass
+- Reference frames: draw named frames at runtime from dual quaternion poses, without editing the XML model
+- Visualization toggles: wireframe, joint axes, contact forces, center of mass, site frames
 - Simulation reset
 - Headless mode (no window) for automated tests, CI and batch experiments
 - CMake package: `find_package(dqrobotics-interface-mujoco)` and the target `dqrobotics_extensions::interface-mujoco`
@@ -119,12 +120,14 @@ The first configure downloads and compiles MuJoCo, so it takes a few minutes. Af
 cd ~/git/cpp-interface-mujoco/build/examples
 ./joint_control
 ./site_poses
+./reference_frames
 ```
 
 | Example | What it shows |
 |---|---|
 | [`joint_control`](examples/joint_control.cpp) | Sinusoidal joint references tracked by position actuators; prints joint positions, velocities and torques |
 | [`site_poses`](examples/site_poses.cpp) | Moves a free-standing `target` frame with `set_site_pose` and reads the `end_effector` frame with `get_site_pose` |
+| [`reference_frames`](examples/reference_frames.cpp) | Draws desired, measured and fixed reference frames, plus a trail of past poses created and removed on the fly |
 
 The examples use [`examples/models/manipulator.xml`](examples/models/manipulator.xml), a generic 6-DoF arm built from
 primitive shapes (no mesh files), which is copied next to the executables at build time.
@@ -225,7 +228,32 @@ link moves with that link. The example manipulator has both kinds:
         <site name="end_effector" pos="0 0 0.06" size="0.01"/>
 ```
 
-Site frames are drawn in the viewer by default.
+Site frames are drawn in the viewer by default; hide them with `set_site_frame_view(false)`.
+
+### Reference frames
+
+To plot a frame (a desired pose, a target, an intermediate frame of your kinematics, ...) you don't need a site in
+the XML: create it at runtime. Reference frames are only drawn, so they don't affect the simulation.
+
+```cpp
+//                     name         axis length  axis width  opacity  label
+mi.add_reference_frame("x_desired", 0.2,         0.009,      0.5);   // created at the world origin
+mi.add_reference_frame("x");                                         // defaults: 0.1, 0.005, 1.0, true
+
+while (!mi.should_close_window())
+{
+    mi.set_reference_frame_pose("x_desired", x_desired);             // any unit dual quaternion
+    mi.set_reference_frame_pose("x", mi.get_site_pose("end_effector"));
+    ...
+    mi.render();
+}
+
+mi.remove_reference_frame("x_desired");
+```
+
+The axes are drawn as arrows (x red, y green, z blue) with the name as a label at the origin. Use the opacity to tell
+frames apart, e.g., a semi-transparent desired pose and an opaque measured pose. In headless mode the frames are stored
+but not drawn.
 
 ## API
 
@@ -242,7 +270,9 @@ Site frames are drawn in the viewer by default.
 | `set_joint_positions(names, q)` | Teleport joints (no dynamics) |
 | `set_joint_target_positions/velocities/forces(names, u)` | Actuator commands |
 | `get_site_pose(name)` / `set_site_pose(name, x)` | Site pose as a unit dual quaternion |
-| `set_wireframe_view`, `set_joint_view`, `set_contact_view`, `set_center_of_mass_view` | Visualization toggles |
+| `add_reference_frame(name, length, width, opacity, label)` / `remove_reference_frame(name)` | Create or remove a frame that is only drawn (no XML needed) |
+| `set_reference_frame_pose(name, x)` / `get_reference_frame_pose(name)` | Pose of a reference frame as a unit dual quaternion |
+| `set_wireframe_view`, `set_joint_view`, `set_contact_view`, `set_center_of_mass_view`, `set_site_frame_view` | Visualization toggles |
 
 ## License
 

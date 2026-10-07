@@ -8,6 +8,7 @@ add_custom_target(copy_example_models
 set(EXAMPLES
     joint_control
     site_poses
+    reference_frames
 )
 foreach(example IN LISTS EXAMPLES)
     add_executable(${example} ${example}.cpp)

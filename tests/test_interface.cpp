@@ -8,7 +8,8 @@ or a single one (this is how CTest calls them) with
 
 The tests must run from the directory that contains the test models (CTest does this).
 Most tests run in HEADLESS mode. The ones that check the window (load_model_twice,
-two_interfaces_at_once) need a display; on a headless machine, use xvfb-run.
+two_interfaces_at_once, reference_frames_more_than_scene_capacity) need a display; on a
+headless machine, use xvfb-run.
 */
 
 #include "dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h"
@@ -230,6 +231,60 @@ static void headless_mode_needs_no_display()
     CHECK(mi.get_joint_positions({"hinge2"})(0) > 0.0);  // the servo moved the joint
 }
 
+static void reference_frames_api()
+{
+    // Works without a model, and in HEADLESS mode (frames are stored, not drawn)
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.add_reference_frame("x_desired", 0.2, 0.01, 0.4, false);
+    CHECK_NEAR(pose_error(mi.get_reference_frame_pose("x_desired"), DQ(1)), 0.0);
+
+    const DQ x = test_pose();
+    mi.set_reference_frame_pose("x_desired", x);
+    CHECK_NEAR(pose_error(mi.get_reference_frame_pose("x_desired"), x), 0.0);
+
+    // Reference frames are independent of the model
+    mi.load_model("test_scene.xml");
+    for (int i = 0; i < 10; i++)
+        mi.trigger_next_simulation_step();
+    mi.reset_simulation();
+    CHECK_NEAR(pose_error(mi.get_reference_frame_pose("x_desired"), x), 0.0);
+
+    // Invalid calls
+    CHECK_THROWS(std::invalid_argument, mi.add_reference_frame("x_desired"));  // already exists
+    CHECK_THROWS(std::invalid_argument, mi.add_reference_frame(""));
+    CHECK_THROWS(std::invalid_argument, mi.add_reference_frame("a", 0.0));
+    CHECK_THROWS(std::invalid_argument, mi.add_reference_frame("b", 0.1, -0.01));
+    CHECK_THROWS(std::invalid_argument, mi.add_reference_frame("c", 0.1, 0.01, 1.5));
+    CHECK_THROWS(std::runtime_error, mi.set_reference_frame_pose("unknown", x));
+    CHECK_THROWS(std::runtime_error, mi.set_reference_frame_pose("x_desired", 2.0*x));  // not unit
+
+    mi.remove_reference_frame("x_desired");
+    CHECK_THROWS(std::runtime_error, mi.get_reference_frame_pose("x_desired"));
+    CHECK_THROWS(std::runtime_error, mi.remove_reference_frame("x_desired"));
+    mi.add_reference_frame("x_desired");  // the name can be reused after removing it
+}
+
+static void reference_frames_more_than_scene_capacity()
+{
+    // 1000 labeled frames need 4000 geoms, more than the scene holds: the extra frames
+    // must be skipped without crashing or corrupting the rendering
+    DQ_MujocoInterface mi;
+    mi.load_model("test_scene.xml");
+    for (int i = 0; i < 1000; i++)
+    {
+        const std::string name = "frame_" + std::to_string(i);
+        mi.add_reference_frame(name);
+        mi.set_reference_frame_pose(name, 1 + 0.5*E_*(0.001*i*i_));
+    }
+    glfwGetError(nullptr);  // clear any previous error
+    for (int i = 0; i < 3; i++)
+    {
+        mi.trigger_next_simulation_step();
+        mi.render();
+    }
+    CHECK(glfwGetError(nullptr) == GLFW_NO_ERROR);
+}
+
 static void two_interfaces_at_once()
 {
     DQ_MujocoInterface a;
@@ -273,6 +328,8 @@ int main(int argc, char** argv)
         {"destroy_without_loading", destroy_without_loading},
         {"two_interfaces_at_once", two_interfaces_at_once},
         {"headless_mode_needs_no_display", headless_mode_needs_no_display},
+        {"reference_frames_api", reference_frames_api},
+        {"reference_frames_more_than_scene_capacity", reference_frames_more_than_scene_capacity},
     };
 
     std::vector<std::string> selected;

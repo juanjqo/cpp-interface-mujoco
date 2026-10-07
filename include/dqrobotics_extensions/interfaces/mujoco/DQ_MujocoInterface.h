@@ -77,6 +77,7 @@ public:
     void set_joint_view(const bool& flag);
     void set_contact_view(const bool &flag);
     void set_center_of_mass_view(const bool& flag);
+    void set_site_frame_view(const bool& flag);
 
 
     void reset_simulation();
@@ -97,6 +98,16 @@ public:
 
     DQ_robotics::DQ get_site_pose(const std::string& objectname) const;
     void set_site_pose(const std::string& objectname, const DQ_robotics::DQ& pose);
+
+    // Reference frames: created at runtime and only drawn in the viewer (no XML, no physics)
+    void add_reference_frame(const std::string& name,
+                             const double& axis_length = 0.1,
+                             const double& axis_width = 0.005,
+                             const double& opacity = 1.0,
+                             const bool& show_label = true);
+    void set_reference_frame_pose(const std::string& name, const DQ_robotics::DQ& pose);
+    DQ_robotics::DQ get_reference_frame_pose(const std::string& name) const;
+    void remove_reference_frame(const std::string& name);
 
 
     virtual ~DQ_MujocoInterface();

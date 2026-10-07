@@ -29,6 +29,8 @@ Contributors:
 #include <unordered_map>
 #include <mutex>
 #include <algorithm>
+#include <cstring>
+#include <map>
 //#include <thread>
 #include "mujoco/mujoco.h"
 #include "GLFW/glfw3.h"
@@ -161,6 +163,21 @@ public:
     double computation_time_{0};
     double avg_computation_time_microseconds_{50.0};
     double computation_time_samples_ = 1000;
+
+    // Reference frames added at runtime. They are drawn as decorations in render() and do not
+    // exist in the MuJoCo model. std::map keeps a deterministic drawing order.
+    struct ReferenceFrame
+    {
+        DQ pose = DQ(1);
+        mjtNum pos[3] = {0, 0, 0};
+        mjtNum mat[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};  // rotation matrix, row-major
+        double axis_length;
+        double axis_width;
+        float opacity;
+        bool show_label;
+    };
+    std::map<std::string, ReferenceFrame> reference_frames_;
+    bool scene_full_warned_{false};
 
     /**
      * @brief Impl
@@ -374,6 +391,76 @@ public:
 
 
     /**
+     * @brief _acquire_decoration_geom returns the next free geom of the scene, initialized as a
+     *        decoration (it mirrors MuJoCo's internal acquireGeom). The caller must increment
+     *        scn_.ngeom once the geom is filled.
+     * @return nullptr if the scene is full.
+     */
+    mjvGeom* _acquire_decoration_geom()
+    {
+        if (scn_.ngeom >= scn_.maxgeom)
+        {
+            if (!scene_full_warned_)
+            {
+                std::cerr << "DQ_MujocoInterface: the scene is full (" << scn_.maxgeom
+                          << " geoms), so some reference frames are not drawn." << std::endl;
+                scene_full_warned_ = true;
+            }
+            return nullptr;
+        }
+        mjvGeom* geom = scn_.geoms + scn_.ngeom;
+        std::memset(geom, 0, sizeof(mjvGeom));
+        mjv_initGeom(geom, mjGEOM_NONE, nullptr, nullptr, nullptr, nullptr);
+        geom->objtype = mjOBJ_UNKNOWN;
+        geom->objid = -1;
+        geom->category = mjCAT_DECOR;
+        geom->segid = scn_.ngeom;
+        return geom;
+    }
+
+    /**
+     * @brief _draw_reference_frame adds the geoms of a reference frame to the scene: one arrow per
+     *        axis (x: red, y: green, z: blue) and, if enabled, a small sphere at the origin with the
+     *        name of the frame as label.
+     */
+    void _draw_reference_frame(const std::string& name, const ReferenceFrame& frame)
+    {
+        static const float axis_rgb[3][3] = {{0.9f, 0.1f, 0.1f},
+                                             {0.1f, 0.8f, 0.1f},
+                                             {0.1f, 0.3f, 0.9f}};
+        for (int axis = 0; axis < 3; axis++)
+        {
+            mjvGeom* geom = _acquire_decoration_geom();
+            if (!geom)
+                return;
+            // The axis direction is the corresponding column of the rotation matrix
+            mjtNum to[3];
+            for (int k = 0; k < 3; k++)
+                to[k] = frame.pos[k] + frame.axis_length * frame.mat[3 * k + axis];
+            mjv_connector(geom, mjGEOM_ARROW, frame.axis_width, frame.pos, to);
+            for (int k = 0; k < 3; k++)
+                geom->rgba[k] = axis_rgb[axis][k];
+            geom->rgba[3] = frame.opacity;
+            geom->transparent = frame.opacity < 1.0f;
+            scn_.ngeom++;
+        }
+
+        if (frame.show_label)
+        {
+            mjvGeom* geom = _acquire_decoration_geom();
+            if (!geom)
+                return;
+            const mjtNum size[3] = {1.5 * frame.axis_width, 0, 0};
+            const float rgba[4] = {0.9f, 0.9f, 0.9f, frame.opacity};
+            mjv_initGeom(geom, mjGEOM_SPHERE, size, frame.pos, frame.mat, rgba);
+            geom->transparent = frame.opacity < 1.0f;
+            std::strncpy(geom->label, name.c_str(), sizeof(geom->label) - 1);
+            geom->label[sizeof(geom->label) - 1] = '\0';
+            scn_.ngeom++;
+        }
+    }
+
+    /**
      * @brief render
      */
     void render()
@@ -387,6 +474,8 @@ public:
 
         // update scene and render
         mjv_updateScene(m_, d_, &opt_, NULL, &cam_, mjCAT_ALL, &scn_);
+        for (const auto& [name, frame] : reference_frames_)
+            _draw_reference_frame(name, frame);
         mjr_render(viewport, &scn_, &con_);
 
 
@@ -1021,6 +1110,19 @@ void DQ_MujocoInterface::set_center_of_mass_view(const bool &flag)
     impl_->opt_.flags[mjVIS_COM] = flag ? 1 : 0;
 }
 
+/**
+ * @brief Show or hide the frames of the sites defined in the XML model
+ * @param flag true to show the site frames (default), false to hide them
+ *
+ * Hiding them is useful when drawing reference frames (add_reference_frame()) on top of sites.
+ * The site geometries themselves (e.g., spheres) are still drawn.
+ */
+void DQ_MujocoInterface::set_site_frame_view(const bool &flag)
+{
+    _check_model();
+    impl_->opt_.frame = flag ? mjFRAME_SITE : mjFRAME_NONE;
+}
+
 
 /**
  * @brief Get current joint positions
@@ -1279,6 +1381,111 @@ void DQ_MujocoInterface::set_site_pose(const std::string &objectname, const DQ &
         throw std::runtime_error(function_name + ". The pose must be a unit dual quaternion!");
     _check_model();
     impl_->_set_site_pose(objectname, pose);
+}
+
+
+/**
+ * @brief Add a reference frame that is drawn in the viewer
+ * @param name Unique name of the frame. It is also shown as a label at its origin.
+ * @param axis_length Length of each axis arrow in meters.
+ * @param axis_width Width (radius) of each axis arrow in meters.
+ * @param opacity Between 0 (invisible) and 1 (opaque). Use different values to tell frames apart,
+ *        e.g., 1.0 for a measured pose and 0.4 for a desired pose.
+ * @param show_label Show the name of the frame at its origin.
+ *
+ * Reference frames do not need to be declared in the XML model, and they are only drawn:
+ * they are not part of the simulation (no physics, no collisions) and do not affect it.
+ * The frame starts at the world origin; move it with set_reference_frame_pose().
+ * The axes are drawn as arrows: x in red, y in green, and z in blue.
+ *
+ * Example usage:
+ * @code
+ * mi.add_reference_frame("x_desired", 0.15, 0.005, 0.4);
+ * while (simulating) {
+ *     mi.set_reference_frame_pose("x_desired", x_desired);
+ *     ...
+ *     mi.render();
+ * }
+ * @endcode
+ *
+ * @note A model does not need to be loaded. In HEADLESS mode the frames are stored but not drawn.
+ * @throws std::invalid_argument if the name is empty or already used, or if a size or the
+ *         opacity is out of range.
+ */
+void DQ_MujocoInterface::add_reference_frame(const std::string& name,
+                                             const double& axis_length,
+                                             const double& axis_width,
+                                             const double& opacity,
+                                             const bool& show_label)
+{
+    const std::string function_name = error_msg_layout_ + "add_reference_frame";
+    if (name.empty())
+        throw std::invalid_argument(function_name + ". The name cannot be empty.");
+    if (impl_->reference_frames_.count(name))
+        throw std::invalid_argument(function_name + ". The reference frame \"" + name + "\" already exists.");
+    if (axis_length <= 0 || axis_width <= 0)
+        throw std::invalid_argument(function_name + ". The axis length and width must be positive.");
+    if (opacity < 0 || opacity > 1)
+        throw std::invalid_argument(function_name + ". The opacity must be between 0 and 1.");
+
+    Impl::ReferenceFrame frame;
+    frame.axis_length = axis_length;
+    frame.axis_width = axis_width;
+    frame.opacity = static_cast<float>(opacity);
+    frame.show_label = show_label;
+    impl_->reference_frames_.emplace(name, frame);
+}
+
+/**
+ * @brief Set the pose of a reference frame added with add_reference_frame()
+ * @param name Name of the frame.
+ * @param pose Unit dual quaternion with the pose of the frame in the world.
+ * @throws std::runtime_error if the frame does not exist or the pose is not a unit dual quaternion.
+ */
+void DQ_MujocoInterface::set_reference_frame_pose(const std::string& name, const DQ& pose)
+{
+    const std::string function_name = error_msg_layout_ + "set_reference_frame_pose";
+    auto it = impl_->reference_frames_.find(name);
+    if (it == impl_->reference_frames_.end())
+        throw std::runtime_error(function_name + ". The reference frame \"" + name
+                                 + "\" does not exist. Add it with add_reference_frame() first.");
+    if (!is_unit(pose))
+        throw std::runtime_error(function_name + ". The pose must be a unit dual quaternion!");
+
+    Impl::ReferenceFrame& frame = it->second;
+    frame.pose = pose;
+    VectorXd p = pose.translation().vec3();
+    VectorXd r = pose.P().vec4();
+    for (int k = 0; k < 3; k++)
+        frame.pos[k] = p(k);
+    mju_quat2Mat(frame.mat, r.data());
+}
+
+/**
+ * @brief Get the pose of a reference frame, as last set with set_reference_frame_pose()
+ * @param name Name of the frame.
+ * @return Unit dual quaternion with the pose of the frame in the world (identity if never set).
+ * @throws std::runtime_error if the frame does not exist.
+ */
+DQ DQ_MujocoInterface::get_reference_frame_pose(const std::string& name) const
+{
+    auto it = impl_->reference_frames_.find(name);
+    if (it == impl_->reference_frames_.end())
+        throw std::runtime_error(error_msg_layout_ + "get_reference_frame_pose. The reference frame \""
+                                 + name + "\" does not exist.");
+    return it->second.pose;
+}
+
+/**
+ * @brief Remove a reference frame added with add_reference_frame()
+ * @param name Name of the frame.
+ * @throws std::runtime_error if the frame does not exist.
+ */
+void DQ_MujocoInterface::remove_reference_frame(const std::string& name)
+{
+    if (impl_->reference_frames_.erase(name) == 0)
+        throw std::runtime_error(error_msg_layout_ + "remove_reference_frame. The reference frame \""
+                                 + name + "\" does not exist.");
 }
 
 
