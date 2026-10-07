@@ -23,6 +23,11 @@ target_link_libraries(dqrobotics-interface-mujoco
     ${TOOL_LIBS}
 )
 
+# Copy the models next to the executables, so the examples can be run from the build directory
+add_custom_target(copy_models
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/models ${CMAKE_BINARY_DIR}
+)
+
 set(EXAMPLES
     joint_control
     site_poses
@@ -30,9 +35,6 @@ set(EXAMPLES
 foreach(example IN LISTS EXAMPLES)
     add_executable(${example} ${example}.cpp)
     target_link_libraries(${example} dqrobotics-interface-mujoco)
+    # Building a single example (e.g., from an IDE) must also copy the models
+    add_dependencies(${example} copy_models)
 endforeach()
-
-# Copy the models next to the executables, so the examples can be run from the build directory
-add_custom_target(copy_models ALL
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/models ${CMAKE_BINARY_DIR}
-)
