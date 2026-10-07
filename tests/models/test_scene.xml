@@ -3,6 +3,14 @@
     Joint ids: box_free = 0, hinge = 1, hinge2 = 2.
     The free joint comes first, so joint ids and DoF addresses differ (hinge is DoF 6).
   -->
+  <!-- implicitfast integrates the actuator damping implicitly, which keeps the stiff servo on the
+       light forearm stable -->
+  <option integrator="implicitfast"/>
+
+  <default>
+    <joint armature="0.01"/>
+  </default>
+
   <worldbody>
     <site name="world_site" pos="0 0 0"/>
     <body name="box" pos="1 1 1">

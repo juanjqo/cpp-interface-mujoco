@@ -46,30 +46,26 @@ Then build and install [DQ Robotics C++](https://github.com/dqrobotics/cpp) from
 mkdir -p ~/git && cd ~/git && git clone https://github.com/juanjqo/cpp-interface-mujoco.git
 ```
 
-UR3e example (`test/`):
-
 ```bash
-cd ~/git/cpp-interface-mujoco/test && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+cd ~/git/cpp-interface-mujoco/examples && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ```
 
 ```bash
-cd ~/git/cpp-interface-mujoco/test/build && ./test
-```
-
-Franka FR3 example (`test2/`):
-
-```bash
-cd ~/git/cpp-interface-mujoco/test2 && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+cd ~/git/cpp-interface-mujoco/examples/build && ./joint_control
 ```
 
 ```bash
-cd ~/git/cpp-interface-mujoco/test2/build && ./test
+cd ~/git/cpp-interface-mujoco/examples/build && ./site_poses
 ```
 
-The first configure downloads and compiles MuJoCo, so it takes a few minutes. The robot models
-(`universal_robots_ur3e/`, `franka_fr3/`) are adapted from
-[MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie) and are copied next to the executable after
-each build.
+| Example | What it shows |
+|---|---|
+| [`joint_control`](examples/joint_control.cpp) | Sinusoidal joint references tracked by position actuators; prints joint positions, velocities and torques |
+| [`site_poses`](examples/site_poses.cpp) | Moves a free-standing `target` frame with `set_site_pose` and reads the `end_effector` frame with `get_site_pose` |
+
+The first configure downloads and compiles MuJoCo, so it takes a few minutes. The examples use
+[`examples/models/manipulator.xml`](examples/models/manipulator.xml), a generic 6-DoF arm built from primitive shapes
+(no mesh files), which is copied next to the executables at build time.
 
 ## Tests
 
@@ -93,10 +89,12 @@ destructor for reads of uninitialized memory.
 int main()
 {
     DQ_MujocoInterface mi;
-    mi.load_model("ur3e_scene.xml");
+    mi.load_model("manipulator.xml");
 
     std::vector<std::string> joints = mi.get_joint_names();
-    mi.set_joint_positions(joints, VectorXd::Zero(joints.size()));  // initial configuration (teleport)
+    VectorXd q_home(6);
+    q_home << 0.0, 0.5, 1.2, 0.0, 1.0, 0.0;
+    mi.set_joint_positions(joints, q_home);  // initial configuration (teleport)
 
     while (!mi.should_close_window())
     {
@@ -105,12 +103,12 @@ int main()
         while (mi.get_simulation_time() - t0 < 1.0/60.0)
         {
             VectorXd q = mi.get_joint_positions(joints);
-            VectorXd q_ref = VectorXd::Constant(joints.size(), 0.2*sin(mi.get_simulation_time()));
+            VectorXd q_ref = q_home + VectorXd::Constant(joints.size(), 0.2*sin(mi.get_simulation_time()));
             mi.set_joint_target_positions(joints, q_ref);  // drives the position actuators
             mi.trigger_next_simulation_step();
         }
 
-        DQ x = mi.get_site_pose("test_frame");  // pose of a site as a unit dual quaternion
+        DQ x = mi.get_site_pose("end_effector");  // pose of a site as a unit dual quaternion
         mi.render();
     }
 }
@@ -123,7 +121,7 @@ depends on the actuator defined in the XML:
 
 | Method | Expected actuator |
 |---|---|
-| `set_joint_target_positions` | `<position>` (or `<general>` with an affine bias, as in the UR3e model) |
+| `set_joint_target_positions` | `<position>` (as in the example manipulator), or `<general>` with an affine bias |
 | `set_joint_target_velocities` | `<velocity>` |
 | `set_joint_target_forces` | `<motor>` |
 
@@ -135,12 +133,16 @@ for initialization and resets, not for control.
 `get_site_pose` and `set_site_pose` work with [sites](https://mujoco.readthedocs.io/en/stable/XMLreference.html#body-site),
 which are frames with no physics. They are useful as end-effector frames or as visual targets. `set_site_pose` stores
 the pose relative to the site's parent body: a site in the `worldbody` stays fixed in the world, and a site on a robot
-link moves with that link. To add a visual target to a scene:
+link moves with that link. The example manipulator has both kinds:
 
 ```xml
 <worldbody>
-  <site name="test_frame" type="sphere" size="0.05" rgba="1 0 0 0.5" pos="0 0 0"/>
-</worldbody>
+  <!-- a free-standing visual target -->
+  <site name="target" type="sphere" size="0.03" rgba="1 0 0 0.5" pos="0.4 0 0.4"/>
+  ...
+      <body name="link6" pos="0 0 0.10">
+        <!-- a frame attached to the last link -->
+        <site name="end_effector" pos="0 0 0.06" size="0.01"/>
 ```
 
 Site frames are drawn in the viewer by default.

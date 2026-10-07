@@ -1,0 +1,4 @@
+build/
+.qtcreator/
+*.user
+MUJOCO_LOG.TXT
