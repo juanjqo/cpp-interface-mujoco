@@ -15,6 +15,9 @@
 #        sudo cmake --install build
 #        sudo ldconfig
 #
+# Without sudo: use -DCMAKE_INSTALL_PREFIX=$HOME/opt in step 1, run step 4 as "cmake --install build"
+# (no sudo, no ldconfig), and configure other projects with -DCMAKE_PREFIX_PATH=$HOME/opt.
+#
 # Then, in another CMake project:
 #   find_package(dqrobotics-interface-mujoco REQUIRED)
 #   target_link_libraries(my_app PRIVATE dqrobotics_extensions::interface-mujoco)

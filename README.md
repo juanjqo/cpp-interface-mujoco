@@ -18,54 +18,107 @@ DQ Robotics can drive a MuJoCo simulation using joint names and dual-quaternion 
 - Headless mode (no window) for automated tests, CI and batch experiments
 - CMake package: `find_package(dqrobotics-interface-mujoco)` and the target `dqrobotics_extensions::interface-mujoco`
 
-## Dependencies
+## Install
+
+> [!NOTE]
+> Non-sudo privileges? Create a custom prefix folder (e.g. `~/opt`) to hold `lib/` and `include/` without needing root.
+> See [this guide](https://ros2-tutorial.readthedocs.io/en/latest/cmake/cmake_packages_without_sudo.html) for
+> background.
+
+### Prerequisites
 
 | Dependency | How it is obtained |
 |---|---|
-| [MuJoCo](https://github.com/google-deepmind/mujoco) 3.9.0 | Downloaded and built automatically by CMake (`FetchContent`) |
+| [MuJoCo](https://github.com/google-deepmind/mujoco) 3.9.0 | Downloaded and built automatically by CMake (`FetchContent`), and installed together with this library |
 | [DQ Robotics C++](https://github.com/dqrobotics/cpp) | Install manually (see below) |
 | Eigen3, GLFW, OpenGL | System packages |
 
-### Ubuntu
+Ubuntu:
 
-```bash
+```shell
 sudo apt install build-essential cmake git libeigen3-dev libglfw3-dev libgl1-mesa-dev
+sudo add-apt-repository ppa:dqrobotics-dev/development
+sudo apt update && sudo apt install libdqrobotics
 ```
 
-```bash
-sudo add-apt-repository ppa:dqrobotics-dev/development && sudo apt update && sudo apt install libdqrobotics
-```
+macOS:
 
-### macOS
-
-```bash
+```shell
 brew install cmake eigen glfw
 ```
 
 Then build and install [DQ Robotics C++](https://github.com/dqrobotics/cpp) from source.
 
-## Build
+If you're installing any of the above without sudo, install them to the same custom prefix `~/opt`, and see the
+non-sudo instructions below.
 
-```bash
-mkdir -p ~/git && cd ~/git && git clone https://github.com/juanjqo/cpp-interface-mujoco.git
+### Clone the repository
+
+```shell
+mkdir -p ~/git && cd ~/git
+git clone https://github.com/juanjqo/cpp-interface-mujoco.git
+cd ~/git/cpp-interface-mujoco
 ```
 
-```bash
-cd ~/git/cpp-interface-mujoco && cmake -S . -B build && cmake --build build -j
+### Sudo users
+
+```shell
+# 1. Configure: choose Release, and (optionally) where to install it.
+#    Omit -DCMAKE_INSTALL_PREFIX to use the system default (/usr/local on Linux).
+#    To build only the library, add -DDQ_MUJOCO_BUILD_EXAMPLES=OFF -DDQ_MUJOCO_BUILD_TESTS=OFF
+cmake -S . -B build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr/local
+
+# 2. Build the library, examples and tests.
+cmake --build build -j$(nproc)
+
+# 3. (Optional) Run the tests.
+ctest --test-dir build --output-on-failure
+
+# 4. Install the headers, the library, MuJoCo, and the exported CMake package, then refresh the linker cache.
+sudo cmake --install build
+sudo ldconfig
 ```
 
-This builds the library, the examples and the tests (in Release mode, unless `CMAKE_BUILD_TYPE` is given). The first
-configure downloads and compiles MuJoCo, so it takes a few minutes. To build only the library, add
-`-DDQ_MUJOCO_BUILD_EXAMPLES=OFF -DDQ_MUJOCO_BUILD_TESTS=OFF`.
+### Non-sudo users
 
-### Examples
+```shell
+# 1. Configure: choose Release, and install to your own prefix instead of a system path.
+#    To build only the library, add -DDQ_MUJOCO_BUILD_EXAMPLES=OFF -DDQ_MUJOCO_BUILD_TESTS=OFF
+cmake -S . -B build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=$HOME/opt
 
-```bash
-cd ~/git/cpp-interface-mujoco/build/examples && ./joint_control
+# 2. Build the library, examples and tests.
+cmake --build build -j$(nproc)
+
+# 3. (Optional) Run the tests.
+ctest --test-dir build --output-on-failure
+
+# 4. Install the headers, the library, MuJoCo, and the exported CMake package. No sudo needed.
+cmake --install build
 ```
 
-```bash
-cd ~/git/cpp-interface-mujoco/build/examples && ./site_poses
+> [!TIP]
+> If you skipped exporting `CMAKE_PREFIX_PATH` (along with `LD_LIBRARY_PATH`, `LIBRARY_PATH`, and `CPATH`) in
+> `~/.bashrc` (see [this guide](https://ros2-tutorial.readthedocs.io/en/latest/cmake/cmake_packages_without_sudo.html)),
+> any project that later does `find_package(dqrobotics-interface-mujoco)` needs to be told where to look, since
+> `$HOME/opt` isn't a default search path:
+>
+> ```shell
+> cmake -S . -B build -DCMAKE_PREFIX_PATH=$HOME/opt
+> ```
+
+The first configure downloads and compiles MuJoCo, so it takes a few minutes. After updating the library (e.g.,
+`git pull`), build and install it again.
+
+## Examples
+
+```shell
+cd ~/git/cpp-interface-mujoco/build/examples
+./joint_control
+./site_poses
 ```
 
 | Example | What it shows |
@@ -76,10 +129,11 @@ cd ~/git/cpp-interface-mujoco/build/examples && ./site_poses
 The examples use [`examples/models/manipulator.xml`](examples/models/manipulator.xml), a generic 6-DoF arm built from
 primitive shapes (no mesh files), which is copied next to the executables at build time.
 
-### Tests
+## Tests
 
-```bash
-cd ~/git/cpp-interface-mujoco && ctest --test-dir build --output-on-failure
+```shell
+cd ~/git/cpp-interface-mujoco
+ctest --test-dir build --output-on-failure
 ```
 
 Most tests run in headless mode. The two that check the window need a display; on a headless machine, run
@@ -87,24 +141,12 @@ Most tests run in headless mode. The two that check the window need a display; o
 [CI workflow](.github/workflows/ci.yml) does. If valgrind is installed, an extra test checks the destructor for reads
 of uninitialized memory.
 
-### Install and use from another project
-
-After [building](#build), install the library once:
-
-```bash
-cd ~/git/cpp-interface-mujoco && sudo cmake --install build && sudo ldconfig
-```
-
-This installs the library, its header, and MuJoCo 3.9.0 (which it depends on) to `/usr/local`. To install elsewhere,
-configure with `-DCMAKE_INSTALL_PREFIX=<dir>` (and pass `-DCMAKE_PREFIX_PATH=<dir>` when configuring your project).
-Reinstall after updating the library. Then, in your project's `CMakeLists.txt`:
+## Usage
 
 ```cmake
 find_package(dqrobotics-interface-mujoco REQUIRED)
-target_link_libraries(my_app PRIVATE dqrobotics_extensions::interface-mujoco)
+target_link_libraries(${YOUR_LIBRARY} PRIVATE dqrobotics_extensions::interface-mujoco)
 ```
-
-## Usage
 
 ```cpp
 #include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h>
