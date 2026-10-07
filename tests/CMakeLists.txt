@@ -8,7 +8,7 @@ add_custom_target(copy_test_models
 
 add_executable(test_interface test_interface.cpp)
 # GLFW is linked directly because one test checks the GLFW error state
-target_link_libraries(test_interface PRIVATE dqrobotics::interface-mujoco glfw)
+target_link_libraries(test_interface PRIVATE dqrobotics_extensions::interface-mujoco glfw)
 add_dependencies(test_interface copy_test_models)
 
 # Each test runs in its own process, so a crash in one does not hide the others

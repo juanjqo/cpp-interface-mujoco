@@ -31,7 +31,7 @@ Contributors:
 #include <string>
 #include <vector>
 
-namespace DQ_robotics
+namespace DQ_robotics_extensions
 {
 
 class DQ_MujocoInterface
@@ -95,8 +95,8 @@ public:
     void            set_joint_target_forces(const std::vector<std::string>& jointnames, const Eigen::VectorXd& forces);
     Eigen::VectorXd get_joint_forces(const std::vector<std::string>& jointnames) const;
 
-    DQ get_site_pose(const std::string& objectname) const;
-    void set_site_pose(const std::string& objectname, const DQ& pose);
+    DQ_robotics::DQ get_site_pose(const std::string& objectname) const;
+    void set_site_pose(const std::string& objectname, const DQ_robotics::DQ& pose);
 
 
     virtual ~DQ_MujocoInterface();

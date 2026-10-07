@@ -1,3 +1,25 @@
+#---------------------------------------------------------------------------------------------------
+# Build and install (run from the repository root)
+#
+#   1. Configure (Release is the default; /usr/local is the default install prefix)
+#        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
+#      To build only the library, add: -DDQ_MUJOCO_BUILD_EXAMPLES=OFF -DDQ_MUJOCO_BUILD_TESTS=OFF
+#
+#   2. Build the library, examples and tests
+#        cmake --build build -j$(nproc)
+#
+#   3. (Optional) Run the tests
+#        ctest --test-dir build --output-on-failure
+#
+#   4. Install the library, its header and MuJoCo, then refresh the linker cache
+#        sudo cmake --install build
+#        sudo ldconfig
+#
+# Then, in another CMake project:
+#   find_package(dqrobotics-interface-mujoco REQUIRED)
+#   target_link_libraries(my_app PRIVATE dqrobotics_extensions::interface-mujoco)
+#---------------------------------------------------------------------------------------------------
+
 cmake_minimum_required(VERSION 3.22...3.28)
 # https://cmake.org/cmake/help/latest/variable/BUILD_SHARED_LIBS.html
 option(BUILD_SHARED_LIBS "Build using shared libraries" ON)
@@ -35,9 +57,9 @@ include(GNUInstallDirs)
 # Library
 #---------------------------------------------------------------------------------------------------
 add_library(${PROJECT_NAME}
-    src/dqrobotics/interfaces/mujoco/DQ_MujocoInterface.cpp
+    src/dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.cpp
 )
-add_library(dqrobotics::interface-mujoco ALIAS ${PROJECT_NAME})
+add_library(dqrobotics_extensions::interface-mujoco ALIAS ${PROJECT_NAME})
 set_target_properties(${PROJECT_NAME} PROPERTIES EXPORT_NAME interface-mujoco)
 
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -64,7 +86,7 @@ elseif(UNIX)
 endif()
 
 #---------------------------------------------------------------------------------------------------
-# Install: provides find_package(dqrobotics-interface-mujoco) and the target dqrobotics::interface-mujoco
+# Install: provides find_package(dqrobotics-interface-mujoco) and the target dqrobotics_extensions::interface-mujoco
 #---------------------------------------------------------------------------------------------------
 include(CMakePackageConfigHelpers)
 set(CONFIG_INSTALL_DIR ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME})
@@ -77,7 +99,7 @@ install(TARGETS ${PROJECT_NAME}
 )
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(EXPORT ${PROJECT_NAME}Targets
-    NAMESPACE dqrobotics::
+    NAMESPACE dqrobotics_extensions::
     DESTINATION ${CONFIG_INSTALL_DIR}
 )
 

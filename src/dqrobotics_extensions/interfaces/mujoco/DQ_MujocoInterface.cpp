@@ -25,7 +25,7 @@ Contributors:
 */
 
 #include <chrono>
-#include <dqrobotics/interfaces/mujoco/DQ_MujocoInterface.h>
+#include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h>
 #include <unordered_map>
 #include <mutex>
 #include <algorithm>
@@ -40,9 +40,10 @@ Contributors:
 }
 
 
-namespace DQ_robotics
+namespace DQ_robotics_extensions
 {
 
+using namespace DQ_robotics;
 using namespace Eigen;
 
 class DQ_MujocoInterface::Impl
@@ -1330,4 +1331,4 @@ void DQ_MujocoInterface::reset_simulation() {
     impl_->reset();
 }
 
-} // namespace DQ_robotics
+} // namespace DQ_robotics_extensions

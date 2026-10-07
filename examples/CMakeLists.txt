@@ -11,7 +11,7 @@ set(EXAMPLES
 )
 foreach(example IN LISTS EXAMPLES)
     add_executable(${example} ${example}.cpp)
-    target_link_libraries(${example} PRIVATE dqrobotics::interface-mujoco)
+    target_link_libraries(${example} PRIVATE dqrobotics_extensions::interface-mujoco)
     # Building a single example (e.g., from an IDE) must also copy the models
     add_dependencies(${example} copy_example_models)
 endforeach()

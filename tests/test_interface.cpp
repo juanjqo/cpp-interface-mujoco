@@ -11,7 +11,7 @@ Most tests run in HEADLESS mode. The ones that check the window (load_model_twic
 two_interfaces_at_once) need a display; on a headless machine, use xvfb-run.
 */
 
-#include "dqrobotics/interfaces/mujoco/DQ_MujocoInterface.h"
+#include "dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h"
 #include <GLFW/glfw3.h>
 #include <cmath>
 #include <functional>
@@ -19,6 +19,7 @@ two_interfaces_at_once) need a display; on a headless machine, use xvfb-run.
 #include <map>
 
 using namespace DQ_robotics;
+using namespace DQ_robotics_extensions;
 using namespace Eigen;
 
 static constexpr auto HEADLESS = DQ_MujocoInterface::RENDERING::HEADLESS;

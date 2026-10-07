@@ -16,7 +16,7 @@ DQ Robotics can drive a MuJoCo simulation using joint names and dual-quaternion 
 - Visualization toggles: wireframe, joint axes, contact forces, center of mass
 - Simulation reset
 - Headless mode (no window) for automated tests, CI and batch experiments
-- CMake package: `find_package(dqrobotics-interface-mujoco)` and the target `dqrobotics::interface-mujoco`
+- CMake package: `find_package(dqrobotics-interface-mujoco)` and the target `dqrobotics_extensions::interface-mujoco`
 
 ## Dependencies
 
@@ -89,24 +89,28 @@ of uninitialized memory.
 
 ### Install and use from another project
 
+After [building](#build), install the library once:
+
 ```bash
-cd ~/git/cpp-interface-mujoco && sudo cmake --install build
+cd ~/git/cpp-interface-mujoco && sudo cmake --install build && sudo ldconfig
 ```
 
-This installs the library, its header, and MuJoCo (which it depends on) to `/usr/local`; use `--prefix <dir>` to
-install elsewhere. Then, in your project's `CMakeLists.txt`:
+This installs the library, its header, and MuJoCo 3.9.0 (which it depends on) to `/usr/local`. To install elsewhere,
+configure with `-DCMAKE_INSTALL_PREFIX=<dir>` (and pass `-DCMAKE_PREFIX_PATH=<dir>` when configuring your project).
+Reinstall after updating the library. Then, in your project's `CMakeLists.txt`:
 
 ```cmake
 find_package(dqrobotics-interface-mujoco REQUIRED)
-target_link_libraries(my_app PRIVATE dqrobotics::interface-mujoco)
+target_link_libraries(my_app PRIVATE dqrobotics_extensions::interface-mujoco)
 ```
 
 ## Usage
 
 ```cpp
-#include <dqrobotics/interfaces/mujoco/DQ_MujocoInterface.h>
+#include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h>
 
-using namespace DQ_robotics;
+using namespace DQ_robotics;             // DQ, i_, j_, k_, E_, ...
+using namespace DQ_robotics_extensions;  // DQ_MujocoInterface
 using namespace Eigen;
 
 int main()

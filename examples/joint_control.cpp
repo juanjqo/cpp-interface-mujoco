@@ -8,13 +8,14 @@ velocities and actuator torques.
 Run it from the directory that contains manipulator.xml (the build copies it next to the executable).
 */
 
-#include "dqrobotics/interfaces/mujoco/DQ_MujocoInterface.h"
+#include "dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h"
 #include <atomic>
 #include <cmath>
 #include <csignal>
 #include <iostream>
 
 using namespace DQ_robotics;
+using namespace DQ_robotics_extensions;
 using namespace Eigen;
 
 /*********************************************
