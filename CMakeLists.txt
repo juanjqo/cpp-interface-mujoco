@@ -65,6 +65,7 @@ include(GNUInstallDirs)
 #---------------------------------------------------------------------------------------------------
 add_library(${PROJECT_NAME}
     src/dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.cpp
+    src/dqrobotics_extensions/interfaces/mujoco/DQ_MujocoSceneBuilder.cpp
 )
 add_library(dqrobotics_extensions::interface-mujoco ALIAS ${PROJECT_NAME})
 set_target_properties(${PROJECT_NAME} PROPERTIES EXPORT_NAME interface-mujoco)

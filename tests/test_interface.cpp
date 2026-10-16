@@ -18,10 +18,12 @@ or a single one (this is how CTest calls them) with
 The tests must run from the directory that contains the test models (CTest does this).
 Most tests run in HEADLESS mode. The ones that check the window (load_model_twice,
 two_interfaces_at_once, reference_frames_more_than_scene_capacity, camera_tracking,
-viewer_draws_in_both_modes) need a display; on a headless machine, use xvfb-run.
+viewer_draws_in_both_modes, edit_scene_with_window) need a display; on a headless machine, use
+xvfb-run.
 */
 
 #include "dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h"
+#include "dqrobotics_extensions/interfaces/mujoco/DQ_MujocoSceneBuilder.h"
 #include "dqrobotics_extensions/interfaces/mujoco/robots/GenericManipulatorRobot.h"
 #include "dqrobotics_extensions/interfaces/mujoco/robots/GenericQuadrupedRobot.h"
 #include <GLFW/glfw3.h>
@@ -792,6 +794,340 @@ static void generic_quadruped_kinematics()
     }
 }
 
+using BODY = DQ_MujocoSceneBuilder::BODY;
+
+// A scene with every kind of element: two quadrupeds (one rotated), an arm, a floor, a light, a
+// fixed table, a free ball and a target site
+struct TestScene
+{
+    DQ_MujocoSceneBuilder builder{"test scene"};
+    DQ x_dog1, x_dog2, x_arm;
+    DQ_MujocoRobotDescription dog1, dog2, arm;
+    TestScene()
+    {
+        const DQ r = cos(M_PI/4) + k_*sin(M_PI/4);  // 90 degrees about z
+        x_dog1 = 1 + 0.5*E_*(1.0*j_);
+        x_dog2 = r + 0.5*E_*(-1.0*j_)*r;
+        x_arm = 1 + 0.5*E_*(-1.0*i_);
+        builder.add_floor();
+        builder.add_light("sun", 3*k_, -1.0*k_, true);
+        builder.add_box("table", 1 + 0.5*E_*(1.0*i_ + 0.2*k_), {0.3, 0.2, 0.2});
+        builder.add_sphere("ball", 1 + 0.5*E_*(1.0*i_ + 1.0*k_), 0.05, BODY::FREE, {1, 0, 0, 1}, 0.2);
+        builder.add_site("target", 1 + 0.5*E_*(0.5*k_));
+        dog1 = builder.add_robot(GenericQuadrupedRobot::description(), "dog1_", x_dog1);
+        dog2 = builder.add_robot(GenericQuadrupedRobot::description(), "dog2_", x_dog2);
+        arm = builder.add_robot(GenericManipulatorRobot::description(), "arm_", x_arm);
+    }
+};
+
+static void scene_builder_build()
+{
+    TestScene scene;
+    // The descriptions of the placed robots have the prefixed names
+    CHECK(scene.dog1.floating_base == "dog1_trunk");
+    CHECK(scene.dog2.joint_names.at(0) == "dog2_FL_hip");
+    CHECK(scene.arm.end_effector_sites == std::vector<std::string>{"arm_end_effector"});
+    CHECK(scene.arm.home_keyframe == "home");
+    CHECK(scene.arm.model.xml.empty());
+
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(scene.builder.build());
+    CHECK((mi.get_floating_base_names() == std::vector<std::string>{"ball", "dog1_trunk", "dog2_trunk"}));
+    CHECK(mi.get_joint_names(true).size() == 8 + 8 + 6);
+
+    // The "home" keyframe has every robot at home, where it was placed
+    mi.reset_simulation("home");
+    const DQ x_trunk_home = 1 + 0.5*E_*(0.27*k_);  // the trunk in the quadruped's home keyframe
+    CHECK_NEAR(pose_error(mi.get_base_pose("dog1_trunk"), scene.x_dog1*x_trunk_home), 0.0);
+    CHECK_NEAR(pose_error(mi.get_base_pose("dog2_trunk"), scene.x_dog2*x_trunk_home), 0.0);
+    CHECK_NEAR((mi.get_joint_positions(scene.dog2.joint_names) - vec({0.6, -1.2, 0.6, -1.2, 0.6, -1.2, 0.6, -1.2})).norm(), 0.0);
+    CHECK_NEAR((mi.get_joint_positions(scene.arm.joint_names) - vec({0, 0.5, 1.2, 0, 1.0, 0})).norm(), 0.0);
+    CHECK_NEAR(pose_error(mi.get_base_pose("ball"), 1 + 0.5*E_*(1.0*i_ + 1.0*k_)), 0.0);
+
+    // The kinematics of the arm, moved to where it was placed, match the simulation
+    DQ_SerialManipulatorDH kinematics = GenericManipulatorRobot::kinematics();
+    kinematics.set_reference_frame(scene.x_arm*kinematics.get_reference_frame());
+    const VectorXd q = mi.get_joint_positions(scene.arm.joint_names);
+    const DQ x_effector = mi.get_site_pose(scene.arm.end_effector_sites.at(0));
+    CHECK(std::min(vec8(kinematics.fkm(q) - x_effector).norm(), vec8(kinematics.fkm(q) + x_effector).norm()) < 1e-9);
+
+    // After 2 s: the quadrupeds stand where they were placed, the arm holds its home pose (its
+    // joint limits and actuators came with it), the ball lies on the table and the table stays
+    for (int i = 0; i < 1000; i++)
+        mi.trigger_next_simulation_step();
+    for (const auto& [dog, x] : {std::make_pair(scene.dog1, scene.x_dog1), std::make_pair(scene.dog2, scene.x_dog2)})
+    {
+        const VectorXd p = mi.get_base_pose(dog.floating_base).translation().vec3();
+        const VectorXd p0 = x.translation().vec3();
+        CHECK(std::abs(p(0) - p0(0)) < 0.05 && std::abs(p(1) - p0(1)) < 0.05);
+        CHECK(p(2) > 0.2 && p(2) < 0.3);
+    }
+    CHECK((mi.get_joint_positions(scene.arm.joint_names) - vec({0, 0.5, 1.2, 0, 1.0, 0})).norm() < 0.05);
+    CHECK(std::abs(mi.get_base_pose("ball").translation().q(3) - 0.45) < 0.01);  // table top 0.4 + radius
+    CHECK_NEAR(pose_error(mi.get_body_pose("table"), 1 + 0.5*E_*(1.0*i_ + 0.2*k_)), 0.0);
+
+    // The site can be moved
+    mi.set_site_pose("target", test_pose());
+    CHECK_NEAR(pose_error(mi.get_site_pose("target"), test_pose()), 0.0);
+}
+
+static void scene_builder_options_and_errors()
+{
+    DQ_MujocoSceneBuilder builder;
+    builder.set_timestep(0.001);
+    builder.set_gravity({0, 0, 0});
+    builder.add_sphere("ball", 1 + 0.5*E_*(1.0*k_), 0.1, BODY::FREE);
+
+    // build() does not change the builder: it can be built again, and changed
+    const DQ_MujocoModel model = builder.build();
+    CHECK(model.xml == builder.build().xml);
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(model);
+    for (int i = 0; i < 100; i++)
+        mi.trigger_next_simulation_step();
+    CHECK_NEAR(mi.get_simulation_time(), 0.1);  // timestep 0.001
+    CHECK_NEAR(mi.get_base_pose("ball").translation().q(3), 1.0);  // no gravity
+
+    // Invalid calls
+    CHECK_THROWS(std::invalid_argument, builder.add_box("ball", DQ(1), {0.1, 0.1, 0.1}));  // name in use
+    CHECK_THROWS(std::invalid_argument, builder.add_box("", DQ(1), {0.1, 0.1, 0.1}));
+    CHECK_THROWS(std::invalid_argument, builder.add_box("box", 2*DQ(1), {0.1, 0.1, 0.1}));  // not unit
+    CHECK_THROWS(std::invalid_argument, builder.add_sphere("light_ball", DQ(1), 0.1, BODY::FREE, {1, 1, 1, 1}, 0.0));
+    CHECK_THROWS(std::invalid_argument, builder.set_timestep(0));
+    CHECK_THROWS(std::invalid_argument, builder.remove("unknown"));
+    builder.add_robot(GenericQuadrupedRobot::description(), "dog_");
+    CHECK_THROWS(std::invalid_argument, builder.add_robot(GenericQuadrupedRobot::description(), "dog_"));  // names in use
+    DQ_MujocoRobotDescription no_key = GenericQuadrupedRobot::description();
+    no_key.home_keyframe = "unknown";
+    CHECK_THROWS(std::invalid_argument, builder.add_robot(no_key, "dog2_"));
+    DQ_MujocoRobotDescription with_assets = GenericQuadrupedRobot::description();
+    with_assets.model.assets["mesh.obj"] = {};
+    CHECK_THROWS(std::invalid_argument, builder.add_robot(with_assets, "dog3_"));
+
+    // Removing an element
+    builder.remove("ball");
+    mi.load_model(builder.build());
+    CHECK((mi.get_floating_base_names() == std::vector<std::string>{"dog_trunk"}));
+}
+
+static void edit_scene_while_running()
+{
+    DQ_MujocoSceneBuilder builder;
+    builder.add_floor();
+    builder.add_robot(GenericQuadrupedRobot::description(), "dog_");
+    builder.add_site("target", 1 + 0.5*E_*(1.0*k_));
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(builder.build());
+    mi.reset_simulation("home");
+    mi.start_simulation();
+    sleep_for(0.3);
+
+    // Add a ball and an arm while running: the simulation continues from its state
+    const DQ x_target = test_pose();
+    mi.set_site_pose("target", x_target);
+    const double t_before = mi.get_simulation_time();
+    const DQ x_trunk_before = mi.get_base_pose("dog_trunk");
+    const auto edit_start = std::chrono::steady_clock::now();
+    mi.edit_scene([](DQ_MujocoSceneBuilder& scene) {
+        scene.add_sphere("ball", 1 + 0.5*E_*(1.0*i_ + 1.0*k_), 0.05, BODY::FREE);
+        scene.add_robot(GenericManipulatorRobot::description(), "arm_", 1 + 0.5*E_*(-1.0*i_));
+    });
+    const double edit_duration = std::chrono::duration<double>(std::chrono::steady_clock::now() - edit_start).count();
+    CHECK(mi.is_simulation_running());
+    // No reset: the simulation kept running in real time during the edit
+    const double advanced = mi.get_simulation_time() - t_before;
+    CHECK(advanced >= 0 && advanced < edit_duration + 0.02);
+    CHECK(vec8(mi.get_base_pose("dog_trunk") - x_trunk_before).norm() < 0.02);
+    CHECK_NEAR(pose_error(mi.get_site_pose("target"), x_target), 0.0);  // set_site_pose() is kept
+
+    // The arm starts at its home configuration and holds it; the ball falls to the floor
+    const std::vector<std::string> arm_joints = {"arm_joint1", "arm_joint2", "arm_joint3",
+                                                 "arm_joint4", "arm_joint5", "arm_joint6"};
+    const VectorXd q_home = vec({0, 0.5, 1.2, 0, 1.0, 0});
+    sleep_for(0.7);
+    CHECK((mi.get_joint_positions(arm_joints) - q_home).norm() < 0.05);
+    CHECK(std::abs(mi.get_base_pose("ball").translation().q(3) - 0.05) < 0.01);
+    CHECK(mi.get_base_pose("dog_trunk").translation().q(3) > 0.2);  // the quadruped still stands
+
+    // Invalid edits, and edits that throw, leave the scene as it was and the simulation running
+    CHECK_THROWS(std::invalid_argument, mi.edit_scene([](DQ_MujocoSceneBuilder& scene) {
+        scene.add_sphere("ball2", DQ(1), 0.05);
+        scene.add_box("ball", DQ(1), {0.1, 0.1, 0.1});  // name in use
+    }));
+    CHECK_THROWS(std::logic_error, mi.edit_scene([](DQ_MujocoSceneBuilder&) {
+        throw std::logic_error("user error");
+    }));
+    CHECK(mi.is_simulation_running());
+    CHECK((mi.get_floating_base_names() == std::vector<std::string>{"dog_trunk", "ball"}));
+    CHECK(mi.get_joint_names(true).size() == 8 + 6);
+
+    // The "home" keyframe includes the new elements
+    mi.reset_simulation("home");
+    CHECK_NEAR((mi.get_joint_positions(arm_joints) - q_home).norm(), 0.0);
+    CHECK_NEAR(pose_error(mi.get_base_pose("ball"), 1 + 0.5*E_*(1.0*i_ + 1.0*k_)), 0.0);
+    CHECK_NEAR(pose_error(mi.get_base_pose("dog_trunk"), 1 + 0.5*E_*(0.27*k_)), 0.0);
+
+    // Removing a site, and a robot by its root body (its joints and actuators go with it)
+    mi.edit_scene([](DQ_MujocoSceneBuilder& scene) {
+        scene.remove("target");
+        scene.remove("arm_base");
+    });
+    CHECK_THROWS(std::runtime_error, mi.get_site_pose("target"));
+    CHECK_THROWS(std::runtime_error, mi.get_joint_positions({"arm_joint1"}));
+    CHECK(mi.get_joint_names(true).size() == 8);
+    mi.reset_simulation("home");
+    CHECK_NEAR(pose_error(mi.get_base_pose("dog_trunk"), 1 + 0.5*E_*(0.27*k_)), 0.0);
+
+    // A new timestep restarts the physics thread with the new period: still real time
+    mi.edit_scene([](DQ_MujocoSceneBuilder& scene) { scene.set_timestep(0.001); });
+    CHECK(mi.is_simulation_running());
+    const double t0 = mi.get_simulation_time();
+    sleep_for(0.6);
+    const double advanced_after_restart = mi.get_simulation_time() - t0;
+    CHECK(advanced_after_restart > 0.55 && advanced_after_restart < 0.65);
+    CHECK(std::abs(mi.get_real_time_factor() - 1.0) < 0.05);
+    mi.stop_simulation();
+}
+
+static void edit_scene_of_a_model_file()
+{
+    // Models loaded from a file can be edited too (stepped mode)
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("test_scene.xml");
+    mi.set_joint_positions({"hinge"}, vec({0.4}));
+    mi.trigger_next_simulation_step();
+    const double t = mi.get_simulation_time();
+    mi.edit_scene([](DQ_MujocoSceneBuilder& scene) {
+        scene.set_gravity({0, 0, 0});
+        scene.add_box("crate", 1 + 0.5*E_*(2.0*i_ + 1.0*k_), {0.1, 0.1, 0.1}, BODY::FREE);
+    });
+    CHECK_NEAR(mi.get_simulation_time(), t);
+    CHECK_NEAR(mi.get_joint_positions({"hinge"})(0), 0.4);
+    for (int i = 0; i < 100; i++)
+        mi.trigger_next_simulation_step();
+    CHECK_NEAR(mi.get_base_pose("crate").translation().q(3), 1.0);  // no gravity anymore
+}
+
+static void edit_scene_with_window()
+{
+    glfwSetErrorCallback(count_glfw_error);
+    DQ_MujocoInterface mi;
+    mi.load_model(GenericQuadrupedRobot::description().model);
+    mi.reset_simulation("home");
+    mi.set_camera_tracking("trunk");
+    mi.add_reference_frame("x");
+    mi.start_simulation();
+    show_for(mi, 0.2);
+    mi.edit_scene([](DQ_MujocoSceneBuilder& scene) {
+        scene.add_sphere("ball", 1 + 0.5*E_*(0.5*i_ + 1.0*k_), 0.05, BODY::FREE, {1, 0, 0, 1});
+        scene.add_light("lamp", 2*k_);
+    });
+    show_for(mi, 0.2);
+    // A new texture: the GPU context is rebuilt
+    mi.edit_scene([](DQ_MujocoSceneBuilder& scene) { scene.add_floor("floor2"); });
+    show_for(mi, 0.2);
+    // Removing the tracked body falls back to the free camera
+    mi.set_camera_tracking("ball");
+    mi.edit_scene([](DQ_MujocoSceneBuilder& scene) { scene.remove("ball"); });
+    show_for(mi, 0.2);
+    CHECK(mi.is_simulation_running());
+    CHECK(glfw_errors == 0);
+}
+
+static DQ_MujocoModel platform_scene()
+{
+    // A kinematic platform at height 0.5, a ball above it, and a fixed wall
+    DQ_MujocoSceneBuilder builder;
+    builder.add_floor();
+    builder.add_box("platform", 1 + 0.5*E_*(0.5*k_), {0.2, 0.2, 0.02}, BODY::KINEMATIC);
+    builder.add_sphere("ball", 1 + 0.5*E_*(0.8*k_), 0.05, BODY::FREE, {1, 0, 0, 1}, 0.1);
+    builder.add_box("wall", 1 + 0.5*E_*(1.0*i_ + 0.5*k_), {0.02, 0.3, 0.5});
+    return builder.build();
+}
+
+static void kinematic_body()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(platform_scene());
+    const DQ x0 = 1 + 0.5*E_*(0.5*k_);
+
+    // Gravity and contacts do not move the platform; the ball comes to rest on it
+    for (int i = 0; i < 500; i++)
+        mi.trigger_next_simulation_step();
+    CHECK_NEAR(pose_error(mi.get_body_pose("platform"), x0), 0.0);
+    CHECK(std::abs(mi.get_base_pose("ball").translation().q(3) - 0.57) < 0.005);  // 0.5 + 0.02 + 0.05
+
+    // Raising the platform (1 mm per step) lifts the ball
+    for (int i = 1; i <= 100; i++)
+    {
+        mi.set_body_pose("platform", 1 + 0.5*E_*((0.5 + 0.001*i)*k_));
+        mi.trigger_next_simulation_step();
+    }
+    for (int i = 0; i < 100; i++)
+        mi.trigger_next_simulation_step();
+    CHECK_NEAR(pose_error(mi.get_body_pose("platform"), 1 + 0.5*E_*(0.6*k_)), 0.0);
+    CHECK(std::abs(mi.get_base_pose("ball").translation().q(3) - 0.67) < 0.005);
+
+    // The new pose is visible at once, also a rotation
+    const DQ x = test_pose();
+    mi.set_body_pose("platform", x);
+    CHECK_NEAR(pose_error(mi.get_body_pose("platform"), x), 0.0);
+
+    // Only kinematic bodies can be moved
+    CHECK_THROWS(std::invalid_argument, mi.set_body_pose("wall", x));
+    try
+    {
+        mi.set_body_pose("ball", x);
+        throw std::runtime_error("set_body_pose did not throw for a FREE body");
+    }
+    catch (const std::invalid_argument& e)
+    {
+        CHECK(std::string(e.what()).find("set_base_pose") != std::string::npos);
+    }
+    CHECK_THROWS(std::runtime_error, mi.set_body_pose("unknown", x));
+    CHECK_THROWS(std::runtime_error, mi.set_body_pose("platform", 2.0*x));  // not unit
+
+    // A moved kinematic body keeps its pose through an edit, and new kinematic bodies start at
+    // their pose
+    mi.edit_scene([](DQ_MujocoSceneBuilder& scene) {
+        scene.add_box("lift", 1 + 0.5*E_*(-1.0*i_ + 0.3*k_), {0.1, 0.1, 0.1}, BODY::KINEMATIC);
+    });
+    CHECK_NEAR(pose_error(mi.get_body_pose("platform"), x), 0.0);
+    CHECK_NEAR(pose_error(mi.get_body_pose("lift"), 1 + 0.5*E_*(-1.0*i_ + 0.3*k_)), 0.0);
+    mi.set_body_pose("lift", 1 + 0.5*E_*(-1.0*i_ + 0.6*k_));
+    CHECK_NEAR(pose_error(mi.get_body_pose("lift"), 1 + 0.5*E_*(-1.0*i_ + 0.6*k_)), 0.0);
+
+    // Resets put the kinematic bodies back at their initial poses
+    mi.reset_simulation();
+    CHECK_NEAR(pose_error(mi.get_body_pose("platform"), x0), 0.0);
+    mi.set_body_pose("platform", x);
+    mi.reset_simulation("home");
+    CHECK_NEAR(pose_error(mi.get_body_pose("platform"), x0), 0.0);
+}
+
+static void kinematic_body_while_running()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(platform_scene());
+    mi.start_simulation();
+
+    // A 500 Hz loop moves the platform along a circle, carrying the ball resting on it (slowly,
+    // since the ball is only pushed by the platform's motion)
+    const auto start = std::chrono::steady_clock::now();
+    DQ x;
+    while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(800))
+    {
+        const double t = mi.get_simulation_time();
+        x = 1 + 0.5*E_*(0.05*sin(t)*i_ + 0.05*(1 - cos(t))*j_ + 0.5*k_);
+        mi.set_body_pose("platform", x);
+        CHECK_NEAR(pose_error(mi.get_body_pose("platform"), x), 0.0);  // at once
+        sleep_for(0.002);
+    }
+    CHECK(std::abs(mi.get_real_time_factor() - 1.0) < 0.05);
+    CHECK(mi.get_base_pose("ball").translation().q(3) > 0.5);  // still on the platform
+    mi.stop_simulation();
+}
+
 static void camera_tracking()
 {
     // Windowed, so that the tracking camera is actually used by the renderer
@@ -952,6 +1288,13 @@ int main(int argc, char** argv)
         {"joint_and_floating_base_names", joint_and_floating_base_names},
         {"reset_to_keyframe", reset_to_keyframe},
         {"camera_tracking", camera_tracking},
+        {"scene_builder_build", scene_builder_build},
+        {"scene_builder_options_and_errors", scene_builder_options_and_errors},
+        {"edit_scene_while_running", edit_scene_while_running},
+        {"edit_scene_of_a_model_file", edit_scene_of_a_model_file},
+        {"edit_scene_with_window", edit_scene_with_window},
+        {"kinematic_body", kinematic_body},
+        {"kinematic_body_while_running", kinematic_body_while_running},
         {"real_time_simulation", real_time_simulation},
         {"commands_and_teleports_while_running", commands_and_teleports_while_running},
         {"viewer_draws_in_both_modes", viewer_draws_in_both_modes},

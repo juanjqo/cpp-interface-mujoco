@@ -12,6 +12,8 @@ Copyright 2021 DeepMind Technologies Limited, licensed under the Apache License,
 
 #include <chrono>
 #include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h>
+#include "DQ_MujocoSceneBuilderImpl.h"
+#include <set>
 #include <unordered_map>
 #include <mutex>
 #include <algorithm>
@@ -137,7 +139,7 @@ public:
     std::atomic<bool> simulation_running_{false};
     double anchor_simulation_time_{0};          // simulation time and wall-clock time from which
     steady_clock::time_point anchor_wall_time_;  // the physics thread keeps real time
-    int max_steps_per_tick_{1};
+    std::atomic<int> max_steps_per_tick_{1};
     std::atomic<double> real_time_factor_{0};
     double rtf_window_simulated_{0};             // simulated time and start of the current
     steady_clock::time_point rtf_window_start_;  // real-time factor measurement window
@@ -165,6 +167,17 @@ public:
     bool model_loaded_{false};
     mjModel* m_ = nullptr;  // MuJoCo model
     mjData* d_ = nullptr;   // MuJoCo data
+
+    // The specification compiled into m_, kept for edit_scene() (mj_recompile() needs the same
+    // specification to keep the state), and the virtual file system of models loaded from memory
+    struct VFSDeleter
+    {
+        void operator()(mjVFS* vfs) const { mj_deleteVFS(vfs); delete vfs; }
+    };
+    using VFSPtr = std::unique_ptr<mjVFS, VFSDeleter>;
+    mjSpec* spec_ = nullptr;
+    VFSPtr vfs_;
+    std::string camera_tracking_body_;  // re-resolved after edits, since body ids can change
 
     mjvCamera cam_;                      // abstract camera
     mjvOption opt_;                      // visualization options
@@ -260,6 +273,7 @@ public:
         if (snapshot_) mj_deleteData(snapshot_);
         if (d_) mj_deleteData(d_);
         if (m_) mj_deleteModel(m_);
+        if (spec_) mj_deleteSpec(spec_);
     }
 
     /**
@@ -312,12 +326,19 @@ public:
     {
         if (xml_model.empty())
             throw std::invalid_argument("xml model path cannot be empty");
-        // load model from file and check for errors
+        // parse and compile the model, and check for errors
         char error[1000] = "";
-        mjModel* m = mj_loadXML(xml_model.c_str(), NULL, error, sizeof(error));
-        if (!m)
+        mjSpec* spec = mj_parseXML(xml_model.c_str(), nullptr, error, sizeof(error));
+        if (!spec)
             throw std::runtime_error("Failed to load the xml model \"" + xml_model + "\": " + error);
-        _set_model(m, xml_model);
+        mjModel* m = mj_compile(spec, nullptr);
+        if (!m)
+        {
+            const std::string message = mjs_getError(spec);
+            mj_deleteSpec(spec);
+            throw std::runtime_error("Failed to load the xml model \"" + xml_model + "\": " + message);
+        }
+        _set_model(m, spec, nullptr, xml_model);
     }
 
     /**
@@ -331,14 +352,10 @@ public:
         if (model.xml.empty())
             throw std::invalid_argument("The xml of the model \"" + model.name + "\" cannot be empty");
 
-        // The virtual file system only has to live while the model is compiled
-        mjVFS vfs;
+        // The virtual file system is kept with the model: edit_scene() compiles it again
+        VFSPtr vfs_holder(new mjVFS);
+        mjVFS& vfs = *vfs_holder;
         mj_defaultVFS(&vfs);
-        struct VFSGuard
-        {
-            mjVFS* vfs;
-            ~VFSGuard() { mj_deleteVFS(vfs); }
-        } guard{&vfs};
 
         auto add_buffer = [&](const std::string& name, const void* buffer, std::size_t size)
         {
@@ -358,18 +375,26 @@ public:
             add_buffer(name, content.data(), content.size());
 
         char error[1000] = "";
-        mjModel* m = mj_loadXML(model.name.c_str(), &vfs, error, sizeof(error));
-        if (!m)
+        mjSpec* spec = mj_parseXML(model.name.c_str(), &vfs, error, sizeof(error));
+        if (!spec)
             throw std::runtime_error("Failed to load the model \"" + model.name + "\": " + error);
-        _set_model(m, model.name);
+        mjModel* m = mj_compile(spec, &vfs);
+        if (!m)
+        {
+            const std::string message = mjs_getError(spec);
+            mj_deleteSpec(spec);
+            throw std::runtime_error("Failed to load the model \"" + model.name + "\": " + message);
+        }
+        _set_model(m, spec, std::move(vfs_holder), model.name);
     }
 
     /**
-     * @brief _set_model replaces the current model by m (which this object then owns), creates its
-     *        data and, in WINDOW mode, prepares the window to render it.
+     * @brief _set_model replaces the current model by m, compiled from spec (with vfs, for models
+     *        loaded from memory), creates its data and, in WINDOW mode, prepares the window to
+     *        render it. This object then owns m, spec and vfs.
      * @param xml_model Path or name of the model, used in error messages.
      */
-    void _set_model(mjModel* m, const std::string& xml_model)
+    void _set_model(mjModel* m, mjSpec* spec, VFSPtr vfs, const std::string& xml_model)
     {
          // make data corresponding to model
         mjData* d = mj_makeData(m);
@@ -378,6 +403,7 @@ public:
         {
             if (d) mj_deleteData(d);
             mj_deleteModel(m);
+            mj_deleteSpec(spec);
             throw std::runtime_error("Failed to allocate the data for the xml model \"" + xml_model + "\"");
         }
 
@@ -389,6 +415,7 @@ public:
         if (snapshot_) mj_deleteData(snapshot_);
         if (d_) mj_deleteData(d_);
         if (m_) mj_deleteModel(m_);
+        if (spec_) mj_deleteSpec(spec_);
         {
             std::lock_guard<std::mutex> lock(lookup_mutex_);
             handles_map_.clear();
@@ -398,6 +425,9 @@ public:
         m_ = m;
         d_ = d;
         snapshot_ = snapshot;
+        spec_ = spec;
+        vfs_ = std::move(vfs);
+        camera_tracking_body_.clear();
         command_ctrl_.assign(m_->nu, 0);
         command_pending_.assign(m_->nu, 0);
         // Catch up at most 50 ms of simulation per wake-up of the physics thread
@@ -494,10 +524,7 @@ public:
         mjr_makeContext(m_, &con_, mjFONTSCALE_150);
 
         opt_.frame = mjFRAME_SITE;          // Show site frames
-
-        //// bodyframe axis width and length
-        m_->vis.scale.framewidth = 0.05;
-        m_->vis.scale.framelength = 1;
+        _apply_visual_settings();
 
         int framebuffer_width, framebuffer_height;
         glfwGetFramebufferSize(window_, &framebuffer_width, &framebuffer_height);
@@ -506,6 +533,156 @@ public:
 
         last_time_ = std::chrono::high_resolution_clock::now();
         _start_viewer();
+    }
+
+    /**
+     * @brief _apply_visual_settings sets the visual settings of the interface in the model
+     *        (needed again after mj_recompile(), which takes them from the specification).
+     */
+    void _apply_visual_settings()
+    {
+        //// bodyframe axis width and length
+        m_->vis.scale.framewidth = 0.05;
+        m_->vis.scale.framelength = 1;
+    }
+
+    /**
+     * @brief recompile applies the edits of the specification to the model, keeping the state
+     *        (mj_recompile()). Elements that did not exist before start at their "home"
+     *        configuration, and the site poses set with set_site_pose() are kept.
+     *
+     * The threads can keep running: the physics thread and the viewer wait for the locks (a few
+     * milliseconds), and the getters read the snapshot until the new one is published.
+     * @param rebuild_gpu_context True if the edit added or removed GPU resources (textures,
+     *        meshes, ...): the viewer must be stopped, since the context is rebuilt in this thread.
+     */
+    void recompile(const DQ_MujocoSceneBuilder::Impl& scene, const bool& rebuild_gpu_context)
+    {
+        auto names_of = [this](const mjtObj& type, const int& count) {
+            std::set<std::string> names;
+            for (int i = 0; i < count; i++)
+                if (const char* name = mj_id2name(m_, type, i))
+                    names.insert(name);
+            return names;
+        };
+        const std::set<std::string> old_joints = names_of(mjOBJ_JOINT, m_->njnt);
+        const std::set<std::string> old_bodies = names_of(mjOBJ_BODY, m_->nbody);
+        const std::set<std::string> old_actuators = names_of(mjOBJ_ACTUATOR, m_->nu);
+        struct SitePose { std::vector<mjtNum> pos, quat; mjtByte sameframe; };
+        std::map<std::string, SitePose> site_poses;
+        for (int i = 0; i < m_->nsite; i++)
+            if (const char* name = mj_id2name(m_, mjOBJ_SITE, i))
+                site_poses[name] = {{m_->site_pos + 3 * i, m_->site_pos + 3 * i + 3},
+                                    {m_->site_quat + 4 * i, m_->site_quat + 4 * i + 4},
+                                    m_->site_sameframe[i]};
+        const double old_timestep = m_->opt.timestep;
+
+        // Lock order: viewer_mutex_ before physics_mutex_
+        std::unique_lock<std::mutex> viewer_lock(viewer_mutex_, std::defer_lock);
+        if (window_)
+            viewer_lock.lock();
+        std::lock_guard<std::mutex> lock(physics_mutex_);
+        // First the structure, which also creates the pending keyframes, then the keyframes (same
+        // layout). The changes were checked on a copy, so these do not fail.
+        if (mj_recompile(spec_, vfs_.get(), m_, d_) != 0)
+            throw std::runtime_error(std::string("Failed to apply the changes to the scene: ")
+                                     + mjs_getError(spec_));
+        scene.fix_keyframes(spec_, m_);
+        if (mj_recompile(spec_, vfs_.get(), m_, d_) != 0)
+            throw std::runtime_error(std::string("Failed to apply the changes to the scene: ")
+                                     + mjs_getError(spec_));
+        _apply_visual_settings();
+
+        // The sizes of the model changed
+        {
+            std::lock_guard<std::mutex> state_lock(state_mutex_);
+            mj_deleteData(snapshot_);
+            snapshot_ = mj_makeData(m_);
+        }
+        {
+            std::lock_guard<std::mutex> command_lock(command_mutex_);
+            command_ctrl_.assign(m_->nu, 0);
+            command_pending_.assign(m_->nu, 0);
+        }
+        max_steps_per_tick_ = std::max(1, static_cast<int>(0.05 / m_->opt.timestep));
+        if (m_->opt.timestep != old_timestep)
+            physics_thread_.reset();  // its period is the timestep (edit_scene() stopped it)
+        {
+            std::lock_guard<std::mutex> lookup_lock(lookup_mutex_);
+            handles_map_.clear();
+            actuator_map_.clear();
+        }
+
+        // Reset values of the sites, and the poses set with set_site_pose()
+        site_pos0_.assign(m_->site_pos, m_->site_pos + 3 * m_->nsite);
+        site_quat0_.assign(m_->site_quat, m_->site_quat + 4 * m_->nsite);
+        site_sameframe0_.assign(m_->site_sameframe, m_->site_sameframe + m_->nsite);
+        for (int i = 0; i < m_->nsite; i++)
+        {
+            const char* name = mj_id2name(m_, mjOBJ_SITE, i);
+            auto it = name ? site_poses.find(name) : site_poses.end();
+            if (it == site_poses.end())
+                continue;
+            std::copy(it->second.pos.begin(), it->second.pos.end(), m_->site_pos + 3 * i);
+            std::copy(it->second.quat.begin(), it->second.quat.end(), m_->site_quat + 4 * i);
+            m_->site_sameframe[i] = it->second.sameframe;
+        }
+
+        // New elements start at their home configuration (new objects are already at their pose)
+        const int home = mj_name2id(m_, mjOBJ_KEY, DQ_MujocoSceneBuilder::Impl::home_keyframe_name_);
+        if (home >= 0)
+        {
+            const mjtNum* key_qpos = m_->key_qpos + home * m_->nq;
+            for (int j = 0; j < m_->njnt; j++)
+            {
+                const char* joint_name = mj_id2name(m_, mjOBJ_JOINT, j);
+                const char* body_name = mj_id2name(m_, mjOBJ_BODY, m_->jnt_bodyid[j]);
+                const bool is_new = m_->jnt_type[j] == mjJNT_FREE
+                                    ? (body_name && !old_bodies.count(body_name))
+                                    : (joint_name && !old_joints.count(joint_name));
+                if (!is_new)
+                    continue;
+                const int adr = m_->jnt_qposadr[j];
+                const int size = m_->jnt_type[j] == mjJNT_FREE ? 7 : (m_->jnt_type[j] == mjJNT_BALL ? 4 : 1);
+                std::copy(key_qpos + adr, key_qpos + adr + size, d_->qpos + adr);
+            }
+            for (int a = 0; a < m_->nu; a++)
+            {
+                const char* actuator_name = mj_id2name(m_, mjOBJ_ACTUATOR, a);
+                if (actuator_name && !old_actuators.count(actuator_name))
+                    d_->ctrl[a] = m_->key_ctrl[home * m_->nu + a];
+            }
+        }
+        mj_forward(m_, d_);
+        if (simulation_running_)
+            _publish_state();
+
+        if (window_)
+        {
+            // The GPU context holds the textures, meshes, etc. of the model
+            if (rebuild_gpu_context)
+            {
+                mjr_freeContext(&con_);
+                mjv_freeScene(&scn_);
+                mjv_defaultScene(&scn_);
+                mjr_defaultContext(&con_);
+                mjv_makeScene(m_, &scn_, 2000);
+                mjr_makeContext(m_, &con_, mjFONTSCALE_150);
+            }
+            const int body_id = camera_tracking_body_.empty()
+                                ? -1 : mj_name2id(m_, mjOBJ_BODY, camera_tracking_body_.c_str());
+            if (cam_.type == mjCAMERA_TRACKING)
+            {
+                if (body_id >= 0)
+                    cam_.trackbodyid = body_id;
+                else
+                {
+                    cam_.type = mjCAMERA_FREE;
+                    cam_.trackbodyid = -1;
+                    camera_tracking_body_.clear();
+                }
+            }
+        }
     }
 
     void update_fps()
@@ -830,8 +1007,10 @@ public:
 
     /**
      * @brief _start_simulation starts the physics thread (if it is not running).
+     * @param resume True to continue after a pause (edit_scene()): the last real-time factor is
+     *        kept until the next measurement.
      */
-    void _start_simulation()
+    void _start_simulation(const bool& resume = false)
     {
         if (simulation_running_)
             return;
@@ -842,7 +1021,8 @@ public:
             std::lock_guard<std::mutex> command_lock(command_mutex_);
             std::fill(command_pending_.begin(), command_pending_.end(), 0);
         }
-        real_time_factor_ = 0;
+        if (!resume)
+            real_time_factor_ = 0;
         rtf_window_simulated_ = 0;
         rtf_window_start_ = steady_clock::now();
         if (!physics_thread_)
@@ -855,8 +1035,9 @@ public:
 
     /**
      * @brief _stop_simulation stops the physics thread (if it is running). The state is kept.
+     * @param pause True for a pause (edit_scene()), which keeps the last real-time factor.
      */
-    void _stop_simulation()
+    void _stop_simulation(const bool& pause = false)
     {
         if (!simulation_running_)
             return;
@@ -867,7 +1048,8 @@ public:
             _apply_commands();
         }
         simulation_running_ = false;
-        real_time_factor_ = 0;
+        if (!pause)
+            real_time_factor_ = 0;
     }
 
     //----------------------------------------------------------------------------------------------
@@ -1130,6 +1312,34 @@ public:
         DQ r = DQ(xquat[0], xquat[1], xquat[2], xquat[3]).normalize();
         DQ p = xpos[0]*i_ + xpos[1]*j_ + xpos[2]*k_;
         return r + 0.5*E_*p*r;
+    }
+
+    /**
+     * @brief _set_body_pose moves a kinematic body (a mocap body): its pose is part of the state
+     *        (mocap_pos and mocap_quat). The kinematics is updated, so that the body and site poses
+     *        reflect the change at once. The caller must hold physics_mutex_.
+     * @throws std::invalid_argument If the body is not a mocap body
+     */
+    void _set_body_pose(const std::string& bodyname, const DQ& pose)
+    {
+        const int body_id = _get_body_handle(bodyname);
+        const int mocap_id = m_->body_mocapid[body_id];
+        if (mocap_id < 0)
+        {
+            const bool is_free = m_->body_jntnum[body_id] == 1
+                                 && m_->jnt_type[m_->body_jntadr[body_id]] == mjJNT_FREE;
+            if (is_free)
+                throw std::invalid_argument("The body \"" + bodyname + "\" is a FREE body (a floating base): "
+                                            "move it with set_base_pose().");
+            throw std::invalid_argument("The body \"" + bodyname + "\" is not KINEMATIC, so it cannot be moved. "
+                                        "Add it with DQ_MujocoSceneBuilder::BODY::KINEMATIC (or mocap=\"true\" "
+                                        "in the XML).");
+        }
+        const VectorXd p = pose.translation().vec3();
+        const VectorXd r = pose.P().vec4();
+        std::copy(p.data(), p.data() + 3, d_->mocap_pos + 3 * mocap_id);
+        std::copy(r.data(), r.data() + 4, d_->mocap_quat + 4 * mocap_id);
+        mj_kinematics(m_, d_);
     }
 
     /**
@@ -2384,6 +2594,32 @@ DQ DQ_MujocoInterface::get_body_pose(const std::string& bodyname) const
 }
 
 /**
+ * @brief Move a kinematic body
+ * @param bodyname Name of a KINEMATIC body (DQ_MujocoSceneBuilder::BODY::KINEMATIC, or a body with
+ *        mocap="true" in the XML).
+ * @param pose Unit dual quaternion with the desired pose of the body frame in the world.
+ *
+ * Kinematic bodies are moved by the program, not by the physics: gravity and contacts do not move
+ * them, but they collide with and push FREE objects and robots. Call it as often as needed, e.g.,
+ * in every iteration of the control loop to follow a trajectory; it is cheap (it only updates the
+ * kinematics). Like the other teleports, it takes effect at once, also while the simulation runs
+ * in real time. reset_simulation() puts the body back at its initial pose.
+ *
+ * @note MuJoCo treats the moved body as having zero velocity in the contacts, so an object resting
+ *       on a moving kinematic platform slides instead of being carried by friction.
+ * @throws std::runtime_error If the body does not exist, or the pose is not a unit dual quaternion
+ * @throws std::invalid_argument If the body is not kinematic (FIXED bodies never move; FREE bodies
+ *         are moved with set_base_pose())
+ */
+void DQ_MujocoInterface::set_body_pose(const std::string& bodyname, const DQ& pose)
+{
+    if (!is_unit(pose))
+        throw std::runtime_error(error_msg_layout_ + "set_body_pose. The pose must be a unit dual quaternion!");
+    _check_model();
+    impl_->modify_state([&]() { impl_->_set_body_pose(bodyname, pose); });
+}
+
+/**
  * @brief Make the viewer camera follow a body
  * @param bodyname Name of the body to follow (e.g., the floating base). An empty name releases
  *        the camera, which then stays where it is.
@@ -2399,6 +2635,7 @@ void DQ_MujocoInterface::set_camera_tracking(const std::string& bodyname)
     _check_model();
     const int body_id = bodyname.empty() ? -1 : impl_->_get_body_handle(bodyname);
     std::lock_guard<std::mutex> lock(impl_->viewer_mutex_);
+    impl_->camera_tracking_body_ = bodyname;
     mjvCamera& cam = impl_->cam_;
     if (body_id == -1)
     {
@@ -2409,6 +2646,104 @@ void DQ_MujocoInterface::set_camera_tracking(const std::string& bodyname)
     cam.trackbodyid = body_id;
     cam.type = mjCAMERA_TRACKING;
     cam.fixedcamid = -1;
+}
+
+/**
+ * @brief Edit the loaded scene, also while the simulation runs: add or remove objects, sites,
+ *        lights and robots
+ * @param edit A function that edits the scene with the methods of DQ_MujocoSceneBuilder, e.g.,
+ * @code
+ * mi.edit_scene([&](DQ_MujocoSceneBuilder& scene) {
+ *     scene.add_sphere("ball2", x, 0.03, DQ_MujocoSceneBuilder::BODY::FREE);
+ *     scene.remove("ball1");
+ * });
+ * @endcode
+ *
+ * The state of the simulation is kept (time, positions, velocities, commands): the scene changes
+ * without a reset, and new objects and robots start at their home configuration. The "home"
+ * keyframe of the scene is updated to include them. Other keyframes of the model are not.
+ * Site poses set with set_site_pose() and the camera are kept too.
+ *
+ * The edits are checked before they are applied: if they make the scene invalid (e.g., a name
+ * that is already used), or edit throws, the scene is left as it was and the exception is
+ * rethrown. A real-time simulation keeps running: it waits while the model is recompiled (a few
+ * milliseconds) and then catches up. Call it from the main thread (the one that loaded the model).
+ *
+ * @note Handles and names cached by the interface are refreshed, since the ids of the elements can
+ *       change. Names given by the user stay valid.
+ * @throws std::runtime_error If no model is loaded, or the edits make the scene invalid
+ */
+void DQ_MujocoInterface::edit_scene(const std::function<void(DQ_MujocoSceneBuilder&)>& edit)
+{
+    _check_model();
+    Impl& impl = *impl_;
+
+    // Edit the specification, and check the result before changing the model, since a failed
+    // mj_recompile() would leave the model and the data invalid. The checks compile a copy: the
+    // specification itself must only be compiled by mj_recompile(), which maps the state of the
+    // previous compilation to the new model.
+    mjSpec* backup = mj_copySpec(impl.spec_);
+    if (!backup)
+        throw std::runtime_error(error_msg_layout_ + "edit_scene. Failed to copy the scene.");
+    struct Compiled
+    {
+        mjSpec* spec = nullptr;
+        mjModel* model = nullptr;
+        ~Compiled()
+        {
+            if (model) mj_deleteModel(model);
+            if (spec) mj_deleteSpec(spec);
+        }
+    };
+    try
+    {
+        DQ_MujocoSceneBuilder scene(std::make_unique<DQ_MujocoSceneBuilder::Impl>(impl.spec_, impl.m_));
+        edit(scene);
+
+        // Check the edited scene
+        Compiled check;
+        check.spec = mj_copySpec(impl.spec_);
+        check.model = check.spec ? mj_compile(check.spec, impl.vfs_.get()) : nullptr;
+        if (!check.model)
+            throw std::runtime_error(error_msg_layout_ + "edit_scene. Invalid scene: "
+                                     + (check.spec ? mjs_getError(check.spec) : "failed to copy it"));
+
+        // Pause only what must be paused (and continue at the end, also if it fails): the viewer
+        // if the GPU context must be rebuilt, the physics thread if its period (the timestep)
+        // changes. Otherwise the threads only wait for the locks while the model is recompiled.
+        const mjModel* c = check.model;
+        const mjModel* m = impl.m_;
+        const bool rebuild_gpu_context = impl.window_
+            && (c->ntex != m->ntex || c->nmesh != m->nmesh || c->nhfield != m->nhfield
+                || c->nskin != m->nskin || c->nflex != m->nflex);
+        const bool restart_physics = impl.simulation_running_ && c->opt.timestep != m->opt.timestep;
+        if (restart_physics)
+            impl._stop_simulation(true);
+        if (rebuild_gpu_context)
+            impl._stop_viewer();  // the OpenGL context is now current in this thread
+        struct Resume
+        {
+            Impl& impl;
+            bool viewer;
+            bool physics;
+            ~Resume()
+            {
+                if (viewer)
+                    impl._start_viewer();
+                if (physics)
+                    impl._start_simulation(true);
+            }
+        } resume{impl, rebuild_gpu_context, restart_physics};
+
+        impl.recompile(*scene.impl_, rebuild_gpu_context);
+    }
+    catch (...)
+    {
+        mj_deleteSpec(impl.spec_);
+        impl.spec_ = backup;
+        throw;
+    }
+    mj_deleteSpec(backup);
 }
 
 } // namespace DQ_robotics_extensions
