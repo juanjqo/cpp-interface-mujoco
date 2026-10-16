@@ -33,6 +33,7 @@ Run it from the directory that contains floating_box.xml (the build copies it ne
 */
 
 #include "dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h"
+#include <marinholab/sas/core/sas_clock.hpp>
 #include <atomic>
 #include <cmath>
 #include <csignal>
@@ -41,6 +42,7 @@ Run it from the directory that contains floating_box.xml (the build copies it ne
 using namespace DQ_robotics;
 using namespace DQ_robotics_extensions;
 using namespace Eigen;
+using marinholab::sas::core::Clock;
 
 /*********************************************
  * SIGNAL HANDLER
@@ -92,30 +94,32 @@ int main()
 
     int current_phase = -1;
 
+    // Stepped mode: this loop advances the simulation itself, one timestep (2 ms) per iteration,
+    // so the twist is sent before every step. The clock paces the loop to real time; without
+    // it, the simulation would run as fast as the computer allows. The window is drawn
+    // automatically.
+    Clock clock(0.002);
+    clock.init();
     while (!mi.should_close_window() && !kill_this_process)
     {
-        double simstart = mi.get_simulation_time();
-        while (mi.get_simulation_time() - simstart < 1.0/60.0)
+        const double t = mi.get_simulation_time();
+        const int phase_index = static_cast<int>(t/phase_duration) % phases.size();
+        const Phase& phase = phases.at(phase_index);
+
+        if (phase_index != current_phase)
         {
-            const double t = mi.get_simulation_time();
-            const int phase_index = static_cast<int>(t/phase_duration) % phases.size();
-            const Phase& phase = phases.at(phase_index);
-
-            if (phase_index != current_phase)
-            {
-                const DQ x = mi.get_base_pose(box);
-                std::cout << "t = " << t << "  " << phase.description
-                          << "  (box at " << x.translation().vec3().transpose() << ")" << std::endl;
-                current_phase = phase_index;
-            }
-
-            // Open loop: the same twist in every step, whatever the pose of the box
-            mi.set_base_twist(box, phase.twist, phase.reference_frame);
-            mi.trigger_next_simulation_step();
+            const DQ x = mi.get_base_pose(box);
+            std::cout << "t = " << t << "  " << phase.description
+                      << "  (box at " << x.translation().vec3().transpose() << ")" << std::endl;
+            current_phase = phase_index;
         }
 
+        // Open loop: the same twist in every step, whatever the pose of the box
+        mi.set_base_twist(box, phase.twist, phase.reference_frame);
+        mi.trigger_next_simulation_step();
+
         mi.set_reference_frame_pose(box, mi.get_base_pose(box));
-        mi.render();
+        clock.update_and_sleep();
     }
     return 0;
 }

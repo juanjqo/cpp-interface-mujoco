@@ -15,12 +15,14 @@ Copyright 2021 DeepMind Technologies Limited, licensed under the Apache License,
 #include <unordered_map>
 #include <mutex>
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <limits>
 #include <map>
-//#include <thread>
+#include <thread>
 #include "mujoco/mujoco.h"
 #include "GLFW/glfw3.h"
+#include <marinholab/sas/core/sas_thread_manager.hpp>
 
 
 [[maybe_unused]] static void glfw_error_callback(int error, const char* description)
@@ -94,19 +96,69 @@ public:
         } else {
             action = mjMOUSE_ZOOM;
         }
+        std::lock_guard<std::mutex> lock(viewer_mutex_);
         mjv_moveCamera(m_, action, dx / height, dy / height, &scn_, &cam_);
     }
 
     // Scroll handler
     void scroll([[maybe_unused]] GLFWwindow* window, double yoffset) {
+        std::lock_guard<std::mutex> lock(viewer_mutex_);
         mjv_moveCamera(m_, mjMOUSE_ZOOM, 0, 0.05 * yoffset, &scn_, &cam_);
     }
 
 public:
-    //std::thread render_thread_;
-    //std::atomic<bool> render_loop_started_{false};
     std::unordered_map<std::string, int> handles_map_; //
     std::unordered_map<std::string, int> actuator_map_; // actuator handles
+    std::mutex lookup_mutex_;  // protects the handle caches above
+
+    //----------------------------------------------------------------------------------------------
+    // Threads
+    //
+    // - Viewer thread (WINDOW mode, from load_model() on): draws the scene at 60 Hz. The window and
+    //   its events stay on the main thread (GLFW requirement); only the OpenGL context is moved to
+    //   the viewer thread, which is allowed. The main thread processes the events in
+    //   should_close_window().
+    // - Physics thread (between start_simulation() and stop_simulation()): steps the simulation in
+    //   real time. Getters read a snapshot of the state published after each step, and the actuator
+    //   commands go to a buffer applied before each step, so the user never waits for mj_step().
+    //
+    // Locks, always taken in this order: viewer_mutex_ -> physics_mutex_ -> {state_mutex_,
+    // command_mutex_}. reference_frames_mutex_ and lookup_mutex_ are leaves: no other lock is taken
+    // while holding them.
+    //----------------------------------------------------------------------------------------------
+    using ThreadManager = marinholab::sas::core::ThreadManager;
+    using steady_clock = std::chrono::steady_clock;
+
+    std::mutex physics_mutex_;  // protects d_ and the mutable parts of m_ (site poses)
+    std::mutex viewer_mutex_;   // protects cam_, opt_, scn_
+
+    // Physics thread
+    std::unique_ptr<ThreadManager> physics_thread_;
+    std::atomic<bool> simulation_running_{false};
+    double anchor_simulation_time_{0};          // simulation time and wall-clock time from which
+    steady_clock::time_point anchor_wall_time_;  // the physics thread keeps real time
+    int max_steps_per_tick_{1};
+    std::atomic<double> real_time_factor_{0};
+    double rtf_window_simulated_{0};             // simulated time and start of the current
+    steady_clock::time_point rtf_window_start_;  // real-time factor measurement window
+
+    // State published by the physics thread after each step, read by the getters while running
+    mjData* snapshot_ = nullptr;
+    std::mutex state_mutex_;
+
+    // Actuator commands written while running, applied by the physics thread before each step
+    std::vector<mjtNum> command_ctrl_;
+    std::vector<char> command_pending_;
+    std::mutex command_mutex_;
+
+    // Viewer thread
+    std::unique_ptr<ThreadManager> viewer_thread_;
+    std::atomic<bool> viewer_release_requested_{false};
+    std::atomic<bool> viewer_released_{false};
+    bool viewer_has_context_{false};  // only used by the viewer thread
+    std::atomic<int> framebuffer_width_{0};
+    std::atomic<int> framebuffer_height_{0};
+    steady_clock::time_point last_event_poll_;
 
 public:
     std::string xml_model_;
@@ -151,10 +203,10 @@ public:
     double fps_{0};
     std::chrono::high_resolution_clock::time_point last_time_;
     double computation_time_{0};
-    double avg_computation_time_microseconds_{50.0};
+    std::atomic<double> avg_computation_time_microseconds_{50.0};
     double computation_time_samples_ = 1000;
 
-    // Reference frames added at runtime. They are drawn as decorations in render() and do not
+    // Reference frames added at runtime. They are drawn as decorations by the viewer and do not
     // exist in the MuJoCo model. std::map keeps a deterministic drawing order.
     struct ReferenceFrame
     {
@@ -167,6 +219,7 @@ public:
         bool show_label;
     };
     std::map<std::string, ReferenceFrame> reference_frames_;
+    std::mutex reference_frames_mutex_;  // the user changes the frames while the viewer draws them
     bool scene_full_warned_{false};
 
     /**
@@ -192,6 +245,10 @@ public:
      * @brief ~Impl() Destructor of the class
      */
     ~Impl(){
+        // stop the threads before anything they use is freed
+        _stop_simulation();
+        physics_thread_.reset();
+
         // free visualization storage while the window (and its OpenGL context) still exists
         _free_visualization();
 
@@ -200,6 +257,7 @@ public:
         _release_glfw();
 
         //free MuJoCo model and data
+        if (snapshot_) mj_deleteData(snapshot_);
         if (d_) mj_deleteData(d_);
         if (m_) mj_deleteModel(m_);
     }
@@ -236,6 +294,7 @@ public:
      */
     void _free_visualization()
     {
+        _stop_viewer();
         if (window_)
         {
             // mjr_freeContext releases OpenGL resources, so it needs this window's context
@@ -314,22 +373,35 @@ public:
     {
          // make data corresponding to model
         mjData* d = mj_makeData(m);
-        if (!d)
+        mjData* snapshot = d ? mj_makeData(m) : nullptr;
+        if (!d || !snapshot)
         {
+            if (d) mj_deleteData(d);
             mj_deleteModel(m);
             throw std::runtime_error("Failed to allocate the data for the xml model \"" + xml_model + "\"");
         }
 
-        // The new model is valid: release the previous one, if any
+        // The new model is valid: stop the threads and release the previous one, if any
+        _stop_simulation();
+        physics_thread_.reset();  // its period depends on the timestep of the model
         model_loaded_ = false;
         _free_visualization();
+        if (snapshot_) mj_deleteData(snapshot_);
         if (d_) mj_deleteData(d_);
         if (m_) mj_deleteModel(m_);
-        handles_map_.clear();
-        actuator_map_.clear();
+        {
+            std::lock_guard<std::mutex> lock(lookup_mutex_);
+            handles_map_.clear();
+            actuator_map_.clear();
+        }
 
         m_ = m;
         d_ = d;
+        snapshot_ = snapshot;
+        command_ctrl_.assign(m_->nu, 0);
+        command_pending_.assign(m_->nu, 0);
+        // Catch up at most 50 ms of simulation per wake-up of the physics thread
+        max_steps_per_tick_ = std::max(1, static_cast<int>(0.05 / m_->opt.timestep));
         xml_model_ = xml_model;
         site_pos0_.assign(m_->site_pos, m_->site_pos + 3 * m_->nsite);
         site_quat0_.assign(m_->site_quat, m_->site_quat + 4 * m_->nsite);
@@ -357,15 +429,22 @@ public:
      */
     void reset(const int& keyframe_id = -1)
     {
-        if (keyframe_id < 0)
-            mj_resetData(m_, d_);
-        else
-            mj_resetDataKeyframe(m_, d_, keyframe_id);
-        std::copy(site_pos0_.begin(), site_pos0_.end(), m_->site_pos);
-        std::copy(site_quat0_.begin(), site_quat0_.end(), m_->site_quat);
-        std::copy(site_sameframe0_.begin(), site_sameframe0_.end(), m_->site_sameframe);
-        // update body/site poses, etc. to match the reset state
-        mj_forward(m_, d_);
+        modify_state([&]() {
+            if (keyframe_id < 0)
+                mj_resetData(m_, d_);
+            else
+                mj_resetDataKeyframe(m_, d_, keyframe_id);
+            std::copy(site_pos0_.begin(), site_pos0_.end(), m_->site_pos);
+            std::copy(site_quat0_.begin(), site_quat0_.end(), m_->site_quat);
+            std::copy(site_sameframe0_.begin(), site_sameframe0_.end(), m_->site_sameframe);
+            // update body/site poses, etc. to match the reset state
+            mj_forward(m_, d_);
+            // The reset sets the time and the controls: keep real time from the new time, and drop
+            // the commands written before the reset
+            _anchor_real_time();
+            std::lock_guard<std::mutex> lock(command_mutex_);
+            std::fill(command_pending_.begin(), command_pending_.end(), 0);
+        });
     }
 
     /**
@@ -388,7 +467,6 @@ public:
             glfwSetWindowUserPointer(window_, this);
 
             glfwMakeContextCurrent(window_);
-            glfwSwapInterval(1); // Enable vsync
 
             // Set callbacks using static wrapper functions
             glfwSetMouseButtonCallback(window_, &Impl::mouse_button_callback);
@@ -421,7 +499,13 @@ public:
         m_->vis.scale.framewidth = 0.05;
         m_->vis.scale.framelength = 1;
 
+        int framebuffer_width, framebuffer_height;
+        glfwGetFramebufferSize(window_, &framebuffer_width, &framebuffer_height);
+        framebuffer_width_ = framebuffer_width;
+        framebuffer_height_ = framebuffer_height;
+
         last_time_ = std::chrono::high_resolution_clock::now();
+        _start_viewer();
     }
 
     void update_fps()
@@ -509,88 +593,354 @@ public:
         }
     }
 
+    //----------------------------------------------------------------------------------------------
+    // Viewer thread
+    //----------------------------------------------------------------------------------------------
+
     /**
-     * @brief render
+     * @brief _viewer_tick draws one frame. It runs in the viewer thread, at 60 Hz.
+     *
+     * Only the copy of the simulation state into the scene (mjv_updateScene, a few microseconds)
+     * holds the physics lock; the drawing does not, so it never delays the physics or the user.
      */
-    void render()
+    void _viewer_tick()
     {
-        // render into this interface's window (several interfaces may be open)
-        glfwMakeContextCurrent(window_);
-
-        // get framebuffer viewport
-        mjrRect viewport = {0, 0, 0, 0};
-        glfwGetFramebufferSize(window_, &viewport.width, &viewport.height);
-
-        // update scene and render
-        mjv_updateScene(m_, d_, &opt_, NULL, &cam_, mjCAT_ALL, &scn_);
-        for (const auto& [name, frame] : reference_frames_)
-            _draw_reference_frame(name, frame);
-        mjr_render(viewport, &scn_, &con_);
-
-
-
-        if (show_profiler_)
+        // _stop_viewer() asks the thread to release the OpenGL context before stopping it
+        if (viewer_release_requested_)
         {
-            // Update profiler position based on current viewport size
-            /*
-            mjrRect profiler_rect;
-            profiler_rect.left = viewport.width - 310;
-            profiler_rect.bottom = viewport.height - 210;
-            profiler_rect.width = 300;
-            profiler_rect.height = 200;
-            */
-
-            // Show MuJoCo's built-in profiler
-            std::string simulation_time_text = "t: " + std::to_string(d_->time) + "s";
-            mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, {viewport.width - 310, viewport.height - 210, 300, 200},
-                        simulation_time_text.c_str(), nullptr, &con_);
-
-
-
-            // Show MuJoCo's built-in profiler
-            std::string text = "FPS: "+std::to_string(fps_);
-            mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, {viewport.width - 310, viewport.height - 250, 300, 200},
-                        text.c_str(), nullptr, &con_);
-
-            // Show MuJoCo's built-in profiler
-            std::string text2 = "ct: "+std::to_string(avg_computation_time_microseconds_)+" us";
-            mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, {viewport.width - 310, viewport.height - 290, 300, 200},
-                        text2.c_str(), nullptr, &con_);
-
-
+            if (viewer_has_context_)
+            {
+                glfwMakeContextCurrent(nullptr);
+                viewer_has_context_ = false;
+            }
+            viewer_released_ = true;
+            return;
+        }
+        if (!viewer_has_context_)
+        {
+            glfwMakeContextCurrent(window_);  // allowed from any thread
+            glfwSwapInterval(0);              // the thread is paced by its clock, not by vsync
+            viewer_has_context_ = true;
         }
 
+        // Copy the reference frames, so that the user is not blocked while they are drawn
+        std::vector<std::pair<std::string, ReferenceFrame>> frames;
+        {
+            std::lock_guard<std::mutex> lock(reference_frames_mutex_);
+            frames.assign(reference_frames_.begin(), reference_frames_.end());
+        }
 
-        // swap OpenGL buffers (blocking call due to v-sync)
-        glfwSwapBuffers(window_);
+        {
+            std::lock_guard<std::mutex> viewer_lock(viewer_mutex_);
+            double simulation_time;
+            {
+                std::lock_guard<std::mutex> physics_lock(physics_mutex_);
+                mjv_updateScene(m_, d_, &opt_, NULL, &cam_, mjCAT_ALL, &scn_);
+                simulation_time = d_->time;
+            }
+            for (const auto& [name, frame] : frames)
+                _draw_reference_frame(name, frame);
 
-        // process pending GUI events, call GLFW callbacks
-        glfwPollEvents();
+            const mjrRect viewport = {0, 0, framebuffer_width_.load(), framebuffer_height_.load()};
+            mjr_render(viewport, &scn_, &con_);
+
+            if (show_profiler_)
+            {
+                std::string text = "t: " + std::to_string(simulation_time) + "s";
+                mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, {viewport.width - 310, viewport.height - 210, 300, 200},
+                            text.c_str(), nullptr, &con_);
+                text = "FPS: " + std::to_string(fps_);
+                mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, {viewport.width - 310, viewport.height - 250, 300, 200},
+                            text.c_str(), nullptr, &con_);
+                text = "ct: " + std::to_string(avg_computation_time_microseconds_.load()) + " us";
+                mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, {viewport.width - 310, viewport.height - 290, 300, 200},
+                            text.c_str(), nullptr, &con_);
+                if (simulation_running_)
+                {
+                    text = "RTF: " + std::to_string(real_time_factor_.load());
+                    mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, {viewport.width - 310, viewport.height - 330, 300, 200},
+                                text.c_str(), nullptr, &con_);
+                }
+            }
+        }
+
+        glfwSwapBuffers(window_);  // allowed from any thread
         update_fps();
     }
 
     /**
-     * @brief step_simulation
+     * @brief _start_viewer moves the OpenGL context to a new viewer thread. Main thread only.
+     */
+    void _start_viewer()
+    {
+        if (!window_ || viewer_thread_)
+            return;
+        glfwMakeContextCurrent(nullptr);  // a context can only be current in one thread
+        viewer_release_requested_ = false;
+        viewer_released_ = false;
+        viewer_thread_ = std::make_unique<ThreadManager>("mujoco_viewer", 1.0 / 60.0,
+                                                         [this]() { _viewer_tick(); },
+                                                         ThreadManager::PRIORITY::BACKGROUND);
+        viewer_thread_->start();
+    }
+
+    /**
+     * @brief _stop_viewer stops the viewer thread and makes the OpenGL context current in the
+     *        calling (main) thread again, e.g., to free it or to make the scene of a new model.
+     */
+    void _stop_viewer()
+    {
+        if (!viewer_thread_)
+            return;
+        // The context must be released by the thread that holds it
+        viewer_release_requested_ = true;
+        const auto deadline = steady_clock::now() + std::chrono::seconds(2);
+        while (!viewer_released_ && steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (!viewer_released_)
+            std::cerr << "DQ_MujocoInterface: the viewer thread did not release the OpenGL context." << std::endl;
+        viewer_thread_->stop();
+        viewer_thread_.reset();
+        if (window_)
+            glfwMakeContextCurrent(window_);
+    }
+
+    /**
+     * @brief poll_events processes the window events (mouse, resize, close). Main thread only
+     *        (GLFW requirement). Polled at most every 4 ms, since a poll takes tens of microseconds.
+     */
+    void poll_events()
+    {
+        if (!window_)
+            return;
+        const auto now = steady_clock::now();
+        if (now - last_event_poll_ < std::chrono::milliseconds(4))
+            return;
+        last_event_poll_ = now;
+        glfwPollEvents();
+        int width, height;
+        glfwGetFramebufferSize(window_, &width, &height);
+        framebuffer_width_ = width;
+        framebuffer_height_ = height;
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Physics thread
+    //----------------------------------------------------------------------------------------------
+
+    /**
+     * @brief _anchor_real_time makes the physics thread keep real time from the current simulation
+     *        time on. The caller must hold physics_mutex_.
+     */
+    void _anchor_real_time()
+    {
+        anchor_simulation_time_ = d_->time;
+        anchor_wall_time_ = steady_clock::now();
+    }
+
+    /**
+     * @brief _publish_state copies the state read by the getters into the snapshot. The caller
+     *        must hold physics_mutex_.
+     */
+    void _publish_state()
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        snapshot_->time = d_->time;
+        mju_copy(snapshot_->qpos, d_->qpos, m_->nq);
+        mju_copy(snapshot_->qvel, d_->qvel, m_->nv);
+        mju_copy(snapshot_->ctrl, d_->ctrl, m_->nu);
+        mju_copy(snapshot_->qfrc_actuator, d_->qfrc_actuator, m_->nv);
+        mju_copy(snapshot_->xpos, d_->xpos, 3 * m_->nbody);
+        mju_copy(snapshot_->xquat, d_->xquat, 4 * m_->nbody);
+        mju_copy(snapshot_->site_xpos, d_->site_xpos, 3 * m_->nsite);
+        mju_copy(snapshot_->site_xmat, d_->site_xmat, 9 * m_->nsite);
+    }
+
+    /**
+     * @brief _apply_commands writes the pending actuator commands to d_->ctrl. The caller must
+     *        hold physics_mutex_.
+     */
+    void _apply_commands()
+    {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        for (int i = 0; i < m_->nu; i++)
+        {
+            if (command_pending_[i])
+            {
+                d_->ctrl[i] = command_ctrl_[i];
+                command_pending_[i] = 0;
+            }
+        }
+    }
+
+    /**
+     * @brief _step steps the simulation and measures the computation time. The caller must hold
+     *        physics_mutex_.
+     */
+    void _step()
+    {
+        const auto start = std::chrono::high_resolution_clock::now();
+        mj_step(m_, d_);
+        const auto end = std::chrono::high_resolution_clock::now();
+        computation_time_ = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        const double& N = computation_time_samples_;
+        avg_computation_time_microseconds_ = (1.0/N)*computation_time_ + ((N-1.0)/N)*avg_computation_time_microseconds_;
+    }
+
+    /**
+     * @brief _physics_tick runs in the physics thread, every timestep. It steps until the
+     *        simulation time reaches the wall-clock time ("catch-up"), so that the simulation
+     *        keeps real time even when a wake-up is late. The lock is taken per step, so the
+     *        viewer and the teleport methods never wait more than one step.
+     */
+    void _physics_tick()
+    {
+        const auto now = steady_clock::now();
+        int steps = 0;
+        while (steps < max_steps_per_tick_)
+        {
+            std::lock_guard<std::mutex> lock(physics_mutex_);
+            const double target = anchor_simulation_time_
+                                  + std::chrono::duration<double>(now - anchor_wall_time_).count();
+            if (d_->time >= target)
+                break;
+            _apply_commands();
+            _step();
+            _publish_state();
+            rtf_window_simulated_ += m_->opt.timestep;
+            steps++;
+        }
+        if (steps == max_steps_per_tick_)
+        {
+            // The computer cannot keep up: run as fast as possible from here on, instead of trying
+            // to recover the lost time later
+            std::lock_guard<std::mutex> lock(physics_mutex_);
+            _anchor_real_time();
+        }
+
+        // Real-time factor, measured over windows of 0.5 s
+        const double window = std::chrono::duration<double>(now - rtf_window_start_).count();
+        if (window >= 0.5)
+        {
+            real_time_factor_ = rtf_window_simulated_ / window;
+            rtf_window_simulated_ = 0;
+            rtf_window_start_ = now;
+        }
+    }
+
+    /**
+     * @brief _start_simulation starts the physics thread (if it is not running).
+     */
+    void _start_simulation()
+    {
+        if (simulation_running_)
+            return;
+        {
+            std::lock_guard<std::mutex> lock(physics_mutex_);
+            _anchor_real_time();
+            _publish_state();
+            std::lock_guard<std::mutex> command_lock(command_mutex_);
+            std::fill(command_pending_.begin(), command_pending_.end(), 0);
+        }
+        real_time_factor_ = 0;
+        rtf_window_simulated_ = 0;
+        rtf_window_start_ = steady_clock::now();
+        if (!physics_thread_)
+            physics_thread_ = std::make_unique<ThreadManager>("mujoco_physics", m_->opt.timestep,
+                                                              [this]() { _physics_tick(); });
+        // From here on, the getters read the snapshot and the commands go to the buffer
+        simulation_running_ = true;
+        physics_thread_->start();
+    }
+
+    /**
+     * @brief _stop_simulation stops the physics thread (if it is running). The state is kept.
+     */
+    void _stop_simulation()
+    {
+        if (!simulation_running_)
+            return;
+        physics_thread_->stop();
+        // Commands written after the last step are not lost
+        {
+            std::lock_guard<std::mutex> lock(physics_mutex_);
+            _apply_commands();
+        }
+        simulation_running_ = false;
+        real_time_factor_ = 0;
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Access to the state, safe while the threads run
+    //----------------------------------------------------------------------------------------------
+
+    /**
+     * @brief read_state calls f with the data that the getters read: the snapshot while the
+     *        physics thread runs (under its lock), and d_ otherwise (only this thread writes d_
+     *        then, so it can be read without the lock).
+     */
+    template<typename F>
+    auto read_state(F&& f)
+    {
+        if (simulation_running_)
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            return f(static_cast<const mjData*>(snapshot_));
+        }
+        return f(static_cast<const mjData*>(d_));
+    }
+
+    /**
+     * @brief modify_state runs f, which writes d_ directly (teleports, resets), under the physics
+     *        lock. While the physics thread runs, the snapshot is updated too, so that the getters
+     *        see the change at once. It waits at most for the step in progress.
+     */
+    template<typename F>
+    void modify_state(F&& f)
+    {
+        std::lock_guard<std::mutex> lock(physics_mutex_);
+        f();
+        if (simulation_running_)
+            _publish_state();
+    }
+
+    /**
+     * @brief command sets the control of an actuator: in d_->ctrl, or in the command buffer
+     *        while the physics thread runs, which applies it before its next step.
+     */
+    void command(const int& actuator_id, const double& value)
+    {
+        if (simulation_running_)
+        {
+            std::lock_guard<std::mutex> lock(command_mutex_);
+            command_ctrl_[actuator_id] = value;
+            command_pending_[actuator_id] = 1;
+        }
+        else
+        {
+            std::lock_guard<std::mutex> lock(physics_mutex_);  // the viewer may be reading d_
+            d_->ctrl[actuator_id] = value;
+        }
+    }
+
+    /**
+     * @brief step_simulation steps once (synchronous mode).
      */
     void step_simulation()
     {
-        auto start = std::chrono::high_resolution_clock::now();
-        //------------------------------------------------------------
         if (!m_ || !d_)
             throw std::runtime_error("Model or data not initialized");
-        mj_step(m_, d_);
-        //------------------------------------------------------------
-
-        auto end = std::chrono::high_resolution_clock::now();
-        computation_time_ = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-
-        const double& N = computation_time_samples_;
-
-        avg_computation_time_microseconds_ = (1.0/N)*computation_time_ + ((N-1.0)/N)*avg_computation_time_microseconds_ ;
+        if (simulation_running_)
+            throw std::runtime_error("The simulation is running in real time (start_simulation()). "
+                                     "Call stop_simulation() before stepping it with "
+                                     "trigger_next_simulation_step().");
+        std::lock_guard<std::mutex> lock(physics_mutex_);
+        _step();
     }
 
     int _get_handle_from_map(const std::string& objectname)
     {
+        std::lock_guard<std::mutex> lock(lookup_mutex_);
         auto search = handles_map_.find(objectname);
         // returns a tuple <bool, int>
         //If the handle is found in the map, returns <true, handle>.
@@ -606,6 +956,7 @@ public:
         }
     }
 
+    // The caller must hold lookup_mutex_
     int get_object_handle(const std::string& objectname)
     {
         int handle;
@@ -694,9 +1045,9 @@ public:
      *
      * Read from qpos (the state that mj_step integrates), so it reflects the latest step.
      */
-    DQ _get_base_pose(const std::string& bodyname) const
+    DQ _get_base_pose(const mjData* d, const std::string& bodyname) const
     {
-        const mjtNum* qpos = d_->qpos + m_->jnt_qposadr[_get_free_joint_handle(bodyname)];
+        const mjtNum* qpos = d->qpos + m_->jnt_qposadr[_get_free_joint_handle(bodyname)];
         // qpos of a free joint: position (x, y, z) followed by the quaternion (w, x, y, z)
         DQ r = DQ(qpos[3], qpos[4], qpos[5], qpos[6]).normalize();
         DQ p = qpos[0]*i_ + qpos[1]*j_ + qpos[2]*k_;
@@ -727,10 +1078,10 @@ public:
      * the body origin in the WORLD frame, and the last three are the angular velocity in the BODY
      * frame.
      */
-    DQ _get_base_twist(const std::string& bodyname, const REFERENCE_FRAME& reference_frame) const
+    DQ _get_base_twist(const mjData* d, const std::string& bodyname, const REFERENCE_FRAME& reference_frame) const
     {
-        const mjtNum* qvel = d_->qvel + m_->jnt_dofadr[_get_free_joint_handle(bodyname)];
-        const DQ x = _get_base_pose(bodyname);
+        const mjtNum* qvel = d->qvel + m_->jnt_dofadr[_get_free_joint_handle(bodyname)];
+        const DQ x = _get_base_pose(d, bodyname);
         const DQ r = x.P();
         const DQ p_dot = qvel[0]*i_ + qvel[1]*j_ + qvel[2]*k_;   // world frame
         const DQ w_body = qvel[3]*i_ + qvel[4]*j_ + qvel[5]*k_;  // body frame
@@ -747,7 +1098,7 @@ public:
     void _set_base_twist(const std::string& bodyname, const DQ& twist, const REFERENCE_FRAME& reference_frame)
     {
         mjtNum* qvel = d_->qvel + m_->jnt_dofadr[_get_free_joint_handle(bodyname)];
-        const DQ x = _get_base_pose(bodyname);
+        const DQ x = _get_base_pose(d_, bodyname);
         const DQ r = x.P();
         VectorXd p_dot, w_body;
         if (reference_frame == REFERENCE_FRAME::BODY_FRAME)
@@ -771,11 +1122,11 @@ public:
      * Read from d_->xpos and d_->xquat, which, like the site poses, are computed at the beginning
      * of mj_step(). After a step they therefore correspond to the state before that step.
      */
-    DQ _get_body_pose(const std::string& bodyname) const
+    DQ _get_body_pose(const mjData* d, const std::string& bodyname) const
     {
         const int body_id = _get_body_handle(bodyname);
-        const mjtNum* xpos = d_->xpos + 3 * body_id;
-        const mjtNum* xquat = d_->xquat + 4 * body_id;
+        const mjtNum* xpos = d->xpos + 3 * body_id;
+        const mjtNum* xquat = d->xquat + 4 * body_id;
         DQ r = DQ(xquat[0], xquat[1], xquat[2], xquat[3]).normalize();
         DQ p = xpos[0]*i_ + xpos[1]*j_ + xpos[2]*k_;
         return r + 0.5*E_*p*r;
@@ -813,9 +1164,12 @@ public:
      */
     int get_actuator_handle_from_joint(const std::string& jointname)
     {
-        auto search = actuator_map_.find(jointname);
-        if (search != actuator_map_.end()) {
-            return search->second;
+        {
+            std::lock_guard<std::mutex> lock(lookup_mutex_);
+            auto search = actuator_map_.find(jointname);
+            if (search != actuator_map_.end()) {
+                return search->second;
+            }
         }
 
         int joint_id = _get_handle_from_map(jointname);
@@ -834,6 +1188,7 @@ public:
         if (actuator_id == -1)
             throw std::runtime_error("Joint " + jointname + " does not have an actuator");
 
+        std::lock_guard<std::mutex> lock(lookup_mutex_);
         actuator_map_.try_emplace(jointname, actuator_id);
         return actuator_id;
     }
@@ -955,21 +1310,21 @@ public:
      *   VectorXd pos = current_pose.translation().vec3();
      *   std::cout << "Site position: (" << pos(0) << ", " << pos(1) << ", " << pos(2) << ")" << std::endl;
      */
-    DQ _get_site_pose(const std::string& site_name)
+    DQ _get_site_pose(const mjData* d, const std::string& site_name)
     {
         // Get the site ID
         int site_id = mj_name2id(m_, mjOBJ_SITE, site_name.c_str());
         if (site_id == -1)
             throw std::runtime_error("Site '" + site_name + "' not found");
 
-        // Get position from d_->site_xpos (3 values per site)
+        // Get position from d->site_xpos (3 values per site)
         // Note: Use site_xpos for sites, xpos is for bodies
-        const mjtNum* xpos = d_->site_xpos + 3 * site_id;
+        const mjtNum* xpos = d->site_xpos + 3 * site_id;
         DQ p = xpos[0] * i_ + xpos[1] * j_ + xpos[2] * k_;
 
         // mjData stores site orientations only as rotation matrices (site_xmat, 9 values per site)
         mjtNum quat[4]; // w, x, y, z
-        mju_mat2Quat(quat, d_->site_xmat + 9 * site_id);
+        mju_mat2Quat(quat, d->site_xmat + 9 * site_id);
         DQ r = DQ(quat[0], quat[1], quat[2], quat[3]);
         r = r.normalize();  // Ensure it's a unit quaternion
 
@@ -986,10 +1341,10 @@ public:
      * Returns the actual joint position from the simulation state (d_->qpos).
      * This reflects the current physical position after dynamics have been applied.
      */
-    double   _get_joint_position(const std::string& jointname)
+    double _get_joint_position(const mjData* d, const std::string& jointname)
     {
         int qpos_adr = m_->jnt_qposadr[_get_single_dof_joint_handle(jointname)];
-        return d_->qpos[qpos_adr];
+        return d->qpos[qpos_adr];
     }
 
 
@@ -1001,10 +1356,10 @@ public:
      * Returns the actual joint velocity from the simulation state (d_->qvel).
      * This is used by MuJoCo's controllers for damping calculations.
      */
-    double _get_joint_velocity(const std::string& jointname)
+    double _get_joint_velocity(const mjData* d, const std::string& jointname)
     {
         int qvel_adr = m_->jnt_dofadr[_get_single_dof_joint_handle(jointname)];
-        return d_->qvel[qvel_adr];
+        return d->qvel[qvel_adr];
     }
 
 
@@ -1082,8 +1437,7 @@ public:
      */
     void _set_joint_target_position(const std::string& jointname, const double& angle_rad)
     {
-        int actuator_id = get_actuator_handle_from_joint(jointname);
-        d_->ctrl[actuator_id] = angle_rad;
+        command(get_actuator_handle_from_joint(jointname), angle_rad);
     }
 
 
@@ -1099,8 +1453,7 @@ public:
      */
     void _set_joint_target_velocity(const std::string& jointname, const double& velocity_rad_per_sec)
     {
-        int actuator_id = get_actuator_handle_from_joint(jointname);
-        d_->ctrl[actuator_id] = velocity_rad_per_sec;
+        command(get_actuator_handle_from_joint(jointname), velocity_rad_per_sec);
     }
 
 
@@ -1116,8 +1469,7 @@ public:
      */
     void _set_joint_target_force(const std::string& jointname, const double& force_nm)
     {
-        int actuator_id = get_actuator_handle_from_joint(jointname);
-        d_->ctrl[actuator_id] = force_nm;
+        command(get_actuator_handle_from_joint(jointname), force_nm);
     }
 
 
@@ -1166,11 +1518,11 @@ public:
      * @see set_joint_target_positions() for position-based control that generates torques
      * @see set_joint_target_velocities() for velocity-based control that generates torques
      */
-    double _get_joint_force(const std::string& jointname)
+    double _get_joint_force(const mjData* d, const std::string& jointname)
     {
         int dof_adr = m_->jnt_dofadr[_get_single_dof_joint_handle(jointname)];
         // qfrc_actuator (size nv) contains the forces generated by actuators, indexed by DoF
-        return d_->qfrc_actuator[dof_adr];
+        return d->qfrc_actuator[dof_adr];
     }
 
 
@@ -1246,34 +1598,90 @@ void DQ_MujocoInterface::trigger_next_simulation_step()
 double DQ_MujocoInterface::get_simulation_time() const
 {
     _check_model();
-    return impl_->d_->time;
+    return impl_->read_state([](const mjData* d) { return d->time; });
+}
+
+/**
+ * @brief Start the simulation in real time
+ *
+ * A physics thread steps the simulation so that the simulation time follows the wall-clock time,
+ * like a real robot (and like CoppeliaSim in its default mode). The program does not step it:
+ * it reads the state and sends commands at its own rate, e.g.,
+ * @code
+ * mi.start_simulation();
+ * while (!mi.should_close_window())
+ * {
+ *     VectorXd q = mi.get_joint_positions(joints);
+ *     mi.set_joint_target_positions(joints, controller(q));
+ *     clock.update_and_sleep();   // the control rate, e.g., with a sas Clock
+ * }
+ * mi.stop_simulation();
+ * @endcode
+ *
+ * While it runs:
+ * - The getters read the state published after the last step, so they never wait for a step.
+ * - The set_joint_target_* commands are applied before the next step.
+ * - Teleports (set_joint_positions(), set_base_pose(), reset_simulation(), ...) wait for the step
+ *   in progress, if any, and take effect at once.
+ * - trigger_next_simulation_step() throws: stop the simulation to step it by hand.
+ *
+ * If the computer cannot keep up, the simulation runs as fast as it can (see
+ * get_real_time_factor()). Calling it while the simulation runs does nothing.
+ *
+ * @throws std::runtime_error If no model is loaded
+ */
+void DQ_MujocoInterface::start_simulation()
+{
+    _check_model();
+    impl_->_start_simulation();
+}
+
+/**
+ * @brief Stop the real-time simulation started by start_simulation()
+ *
+ * The state is kept: the simulation can be started again, stepped with
+ * trigger_next_simulation_step(), or reset. Calling it when the simulation is not running does
+ * nothing. load_model() and the destructor also stop it.
+ */
+void DQ_MujocoInterface::stop_simulation()
+{
+    impl_->_stop_simulation();
+}
+
+/**
+ * @brief Whether the simulation runs in real time (between start_simulation() and stop_simulation())
+ */
+bool DQ_MujocoInterface::is_simulation_running() const
+{
+    return impl_->simulation_running_;
+}
+
+/**
+ * @brief Simulated time per wall-clock time, measured over the last 0.5 s
+ * @return About 1 while the simulation keeps real time, less if the computer cannot keep up, and
+ *         0 when the simulation is not running (or during its first 0.5 s).
+ */
+double DQ_MujocoInterface::get_real_time_factor() const
+{
+    return impl_->real_time_factor_;
 }
 
 /**
  * @brief Check whether the user asked to close the window
  * @return true if the window was closed. Always false in HEADLESS mode.
+ *
+ * It also processes the window events (mouse, resize, close), which GLFW only allows in the main
+ * thread, so call it regularly from the main thread, e.g., as the condition of the main loop.
+ * Otherwise the window keeps being drawn but does not respond.
  */
 bool DQ_MujocoInterface::should_close_window() const
 {
     _check_model();
     if (!impl_->window_)
         return false;
+    impl_->poll_events();
     return glfwWindowShouldClose(impl_->window_);
 }
-
-/**
- * @brief Draw the current state of the simulation in the window
- *
- * In HEADLESS mode this does nothing, so the same simulation loop works in both modes.
- */
-void DQ_MujocoInterface::render()
-{
-    _check_model();
-    if (!impl_->window_)
-        return;
-    impl_->render();
-}
-
 
 /**
  * @brief Enable or disable wireframe rendering mode
@@ -1297,6 +1705,7 @@ void DQ_MujocoInterface::render()
 void DQ_MujocoInterface::set_wireframe_view(const bool &flag)
 {
     _check_model();
+    std::lock_guard<std::mutex> lock(impl_->viewer_mutex_);
     impl_->scn_.flags[mjRND_WIREFRAME] = flag ? 1 : 0;
 }
 
@@ -1337,18 +1746,21 @@ void DQ_MujocoInterface::set_wireframe_view(const bool &flag)
 void DQ_MujocoInterface::set_joint_view(const bool &flag)
 {
     _check_model();
+    std::lock_guard<std::mutex> lock(impl_->viewer_mutex_);
     impl_->opt_.flags[mjVIS_JOINT] = flag ? 1 : 0; // Enable visualization of joint axes
 }
 
 void DQ_MujocoInterface::set_contact_view(const bool &flag)
 {
     _check_model();
+    std::lock_guard<std::mutex> lock(impl_->viewer_mutex_);
     impl_->opt_.flags[mjVIS_CONTACTFORCE] = flag ? 1 : 0;
 }
 
 void DQ_MujocoInterface::set_center_of_mass_view(const bool &flag)
 {
     _check_model();
+    std::lock_guard<std::mutex> lock(impl_->viewer_mutex_);
     impl_->opt_.flags[mjVIS_COM] = flag ? 1 : 0;
 }
 
@@ -1362,6 +1774,7 @@ void DQ_MujocoInterface::set_center_of_mass_view(const bool &flag)
 void DQ_MujocoInterface::set_site_frame_view(const bool &flag)
 {
     _check_model();
+    std::lock_guard<std::mutex> lock(impl_->viewer_mutex_);
     impl_->opt_.frame = flag ? mjFRAME_SITE : mjFRAME_NONE;
 }
 
@@ -1402,11 +1815,14 @@ void DQ_MujocoInterface::set_site_frame_view(const bool &flag)
 VectorXd DQ_MujocoInterface::get_joint_positions(const std::vector<std::string> &jointnames) const
 {
     _check_model();
-    int n = jointnames.size();
-    VectorXd joint_positions(n);
-    for(auto i=0;i<n;i++)
-        joint_positions(i)=impl_->_get_joint_position(jointnames.at(i));
-    return joint_positions;
+    // All the values come from the same simulation step
+    return impl_->read_state([&](const mjData* d) {
+        const int n = jointnames.size();
+        VectorXd joint_positions(n);
+        for (int i = 0; i < n; i++)
+            joint_positions(i) = impl_->_get_joint_position(d, jointnames.at(i));
+        return joint_positions;
+    });
 }
 
 
@@ -1448,11 +1864,14 @@ VectorXd DQ_MujocoInterface::get_joint_positions(const std::vector<std::string> 
 VectorXd DQ_MujocoInterface::get_joint_velocities(const std::vector<std::string>& jointnames) const
 {
     _check_model();
-    int n = jointnames.size();
-    VectorXd joint_velocities(n);
-    for(auto i=0;i<n;i++)
-        joint_velocities(i)=impl_->_get_joint_velocity(jointnames.at(i));
-    return joint_velocities;
+    // All the values come from the same simulation step
+    return impl_->read_state([&](const mjData* d) {
+        const int n = jointnames.size();
+        VectorXd joint_velocities(n);
+        for (int i = 0; i < n; i++)
+            joint_velocities(i) = impl_->_get_joint_velocity(d, jointnames.at(i));
+        return joint_velocities;
+    });
 }
 
 
@@ -1505,10 +1924,12 @@ void DQ_MujocoInterface::set_joint_positions(const std::vector<std::string>& joi
 {
     _check_model();
     check_vector_size(jointnames, angles_rad, "set_joint_positions");
-    for(std::size_t i=0;i<jointnames.size();i++)
-        impl_->_set_joint_position(jointnames.at(i), angles_rad(i));
-    // update body/site poses, etc. to match the new joint positions
-    mj_forward(impl_->m_, impl_->d_);
+    impl_->modify_state([&]() {
+        for (std::size_t i = 0; i < jointnames.size(); i++)
+            impl_->_set_joint_position(jointnames.at(i), angles_rad(i));
+        // update body/site poses, etc. to match the new joint positions
+        mj_forward(impl_->m_, impl_->d_);
+    });
 }
 
 
@@ -1601,17 +2022,20 @@ void DQ_MujocoInterface::set_joint_target_forces(const std::vector<std::string>&
 VectorXd DQ_MujocoInterface::get_joint_forces(const std::vector<std::string>& jointnames) const
 {
     _check_model();
-    int n = jointnames.size();
-    VectorXd joint_forces(n);
-    for(auto i=0;i<n;i++)
-        joint_forces(i)=impl_->_get_joint_force(jointnames.at(i));
-    return joint_forces;
+    // All the values come from the same simulation step
+    return impl_->read_state([&](const mjData* d) {
+        const int n = jointnames.size();
+        VectorXd joint_forces(n);
+        for (int i = 0; i < n; i++)
+            joint_forces(i) = impl_->_get_joint_force(d, jointnames.at(i));
+        return joint_forces;
+    });
 }
 
 DQ DQ_MujocoInterface::get_site_pose(const std::string &objectname) const
 {
     _check_model();
-    return impl_->_get_site_pose(objectname);
+    return impl_->read_state([&](const mjData* d) { return impl_->_get_site_pose(d, objectname); });
 }
 
 void DQ_MujocoInterface::set_site_pose(const std::string &objectname, const DQ &pose)
@@ -1622,7 +2046,7 @@ void DQ_MujocoInterface::set_site_pose(const std::string &objectname, const DQ &
     if (!is_unit(pose))
         throw std::runtime_error(function_name + ". The pose must be a unit dual quaternion!");
     _check_model();
-    impl_->_set_site_pose(objectname, pose);
+    impl_->modify_state([&]() { impl_->_set_site_pose(objectname, pose); });
 }
 
 
@@ -1643,10 +2067,9 @@ void DQ_MujocoInterface::set_site_pose(const std::string &objectname, const DQ &
  * Example usage:
  * @code
  * mi.add_reference_frame("x_desired", 0.15, 0.005, 0.4);
- * while (simulating) {
+ * while (!mi.should_close_window()) {
  *     mi.set_reference_frame_pose("x_desired", x_desired);
  *     ...
- *     mi.render();
  * }
  * @endcode
  *
@@ -1663,6 +2086,7 @@ void DQ_MujocoInterface::add_reference_frame(const std::string& name,
     const std::string function_name = error_msg_layout_ + "add_reference_frame";
     if (name.empty())
         throw std::invalid_argument(function_name + ". The name cannot be empty.");
+    std::lock_guard<std::mutex> lock(impl_->reference_frames_mutex_);
     if (impl_->reference_frames_.count(name))
         throw std::invalid_argument(function_name + ". The reference frame \"" + name + "\" already exists.");
     if (axis_length <= 0 || axis_width <= 0)
@@ -1687,6 +2111,7 @@ void DQ_MujocoInterface::add_reference_frame(const std::string& name,
 void DQ_MujocoInterface::set_reference_frame_pose(const std::string& name, const DQ& pose)
 {
     const std::string function_name = error_msg_layout_ + "set_reference_frame_pose";
+    std::lock_guard<std::mutex> lock(impl_->reference_frames_mutex_);
     auto it = impl_->reference_frames_.find(name);
     if (it == impl_->reference_frames_.end())
         throw std::runtime_error(function_name + ". The reference frame \"" + name
@@ -1711,6 +2136,7 @@ void DQ_MujocoInterface::set_reference_frame_pose(const std::string& name, const
  */
 DQ DQ_MujocoInterface::get_reference_frame_pose(const std::string& name) const
 {
+    std::lock_guard<std::mutex> lock(impl_->reference_frames_mutex_);
     auto it = impl_->reference_frames_.find(name);
     if (it == impl_->reference_frames_.end())
         throw std::runtime_error(error_msg_layout_ + "get_reference_frame_pose. The reference frame \""
@@ -1725,6 +2151,7 @@ DQ DQ_MujocoInterface::get_reference_frame_pose(const std::string& name) const
  */
 void DQ_MujocoInterface::remove_reference_frame(const std::string& name)
 {
+    std::lock_guard<std::mutex> lock(impl_->reference_frames_mutex_);
     if (impl_->reference_frames_.erase(name) == 0)
         throw std::runtime_error(error_msg_layout_ + "remove_reference_frame. The reference frame \""
                                  + name + "\" does not exist.");
@@ -1834,7 +2261,7 @@ std::vector<std::string> DQ_MujocoInterface::get_floating_base_names() const
 DQ DQ_MujocoInterface::get_base_pose(const std::string& bodyname) const
 {
     _check_model();
-    return impl_->_get_base_pose(bodyname);
+    return impl_->read_state([&](const mjData* d) { return impl_->_get_base_pose(d, bodyname); });
 }
 
 /**
@@ -1853,9 +2280,11 @@ void DQ_MujocoInterface::set_base_pose(const std::string& bodyname, const DQ& po
     if (!is_unit(pose))
         throw std::runtime_error(error_msg_layout_ + "set_base_pose. The pose must be a unit dual quaternion!");
     _check_model();
-    impl_->_set_base_pose(bodyname, pose);
-    // update body/site poses, etc. to match the new base pose
-    mj_forward(impl_->m_, impl_->d_);
+    impl_->modify_state([&]() {
+        impl_->_set_base_pose(bodyname, pose);
+        // update body/site poses, etc. to match the new base pose
+        mj_forward(impl_->m_, impl_->d_);
+    });
 }
 
 /**
@@ -1896,7 +2325,7 @@ void DQ_MujocoInterface::set_base_pose(const std::string& bodyname, const DQ& po
 DQ DQ_MujocoInterface::get_base_twist(const std::string& bodyname, const REFERENCE_FRAME& reference_frame) const
 {
     _check_model();
-    return impl_->_get_base_twist(bodyname, reference_frame);
+    return impl_->read_state([&](const mjData* d) { return impl_->_get_base_twist(d, bodyname, reference_frame); });
 }
 
 /**
@@ -1932,9 +2361,11 @@ void DQ_MujocoInterface::set_base_twist(const std::string& bodyname, const DQ& t
     if (!is_pure(twist))
         throw std::runtime_error(error_msg_layout_ + "set_base_twist. The twist must be a pure dual quaternion!");
     _check_model();
-    impl_->_set_base_twist(bodyname, twist, reference_frame);
-    // update velocity-dependent quantities
-    mj_forward(impl_->m_, impl_->d_);
+    impl_->modify_state([&]() {
+        impl_->_set_base_twist(bodyname, twist, reference_frame);
+        // update velocity-dependent quantities
+        mj_forward(impl_->m_, impl_->d_);
+    });
 }
 
 /**
@@ -1949,7 +2380,7 @@ void DQ_MujocoInterface::set_base_twist(const std::string& bodyname, const DQ& t
 DQ DQ_MujocoInterface::get_body_pose(const std::string& bodyname) const
 {
     _check_model();
-    return impl_->_get_body_pose(bodyname);
+    return impl_->read_state([&](const mjData* d) { return impl_->_get_body_pose(d, bodyname); });
 }
 
 /**
@@ -1966,14 +2397,16 @@ DQ DQ_MujocoInterface::get_body_pose(const std::string& bodyname) const
 void DQ_MujocoInterface::set_camera_tracking(const std::string& bodyname)
 {
     _check_model();
+    const int body_id = bodyname.empty() ? -1 : impl_->_get_body_handle(bodyname);
+    std::lock_guard<std::mutex> lock(impl_->viewer_mutex_);
     mjvCamera& cam = impl_->cam_;
-    if (bodyname.empty())
+    if (body_id == -1)
     {
         cam.type = mjCAMERA_FREE;
         cam.trackbodyid = -1;
         return;
     }
-    cam.trackbodyid = impl_->_get_body_handle(bodyname);
+    cam.trackbodyid = body_id;
     cam.type = mjCAMERA_TRACKING;
     cam.fixedcamid = -1;
 }

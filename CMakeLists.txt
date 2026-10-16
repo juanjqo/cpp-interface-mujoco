@@ -75,13 +75,14 @@ target_include_directories(${PROJECT_NAME} PUBLIC
 )
 
 # The public header only exposes DQ Robotics (and Eigen through it).
-# MuJoCo, GLFW and OpenGL are implementation details.
+# MuJoCo, sas, GLFW and OpenGL are implementation details.
 target_link_libraries(${PROJECT_NAME}
     PUBLIC
     dqrobotics
     Eigen3::Eigen
     PRIVATE
     mujoco::mujoco
+    marinholab::sas::core
     ${TOOL_LIBS}
 )
 

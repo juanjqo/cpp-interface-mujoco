@@ -23,9 +23,9 @@ class DQ_MujocoInterface
 public:
     /**
      * @brief How the simulation is visualized.
-     *  WINDOW:   load_model() opens a window, and render() draws the scene in it.
-     *  HEADLESS: no window is opened and render() does nothing. Use it to run simulations
-     *            without a display (e.g., automated tests, CI, or batch experiments).
+     *  WINDOW:   load_model() opens a window, which a viewer thread draws at 60 Hz.
+     *  HEADLESS: no window is opened. Use it to run simulations without a display (e.g.,
+     *            automated tests, CI, or batch experiments).
      */
     enum class RENDERING
     {
@@ -62,11 +62,20 @@ public:
     void load_model(const DQ_MujocoModel& model);
 
 
+    // Two ways to run the simulation (the window, if any, is drawn by a viewer thread in both):
+    //  - Real time: start_simulation() starts a physics thread that keeps the simulation in real
+    //    time, like a real robot; the program reads the state and sends commands at its own rate.
+    //  - Stepped: trigger_next_simulation_step() advances one timestep (when not running).
+    void start_simulation();
+    void stop_simulation();
+    bool is_simulation_running() const;
+    double get_real_time_factor() const;
+
     void trigger_next_simulation_step();
     double get_simulation_time() const;
 
+    // Processes the window events: call it regularly from the main thread (e.g., as the loop condition)
     bool should_close_window() const;
-    void render();
 
     //Visualization tools
     void set_wireframe_view(const bool& flag);

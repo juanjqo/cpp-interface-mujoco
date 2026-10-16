@@ -17,14 +17,16 @@ or a single one (this is how CTest calls them) with
 
 The tests must run from the directory that contains the test models (CTest does this).
 Most tests run in HEADLESS mode. The ones that check the window (load_model_twice,
-two_interfaces_at_once, reference_frames_more_than_scene_capacity, camera_tracking) need a
-display; on a headless machine, use xvfb-run.
+two_interfaces_at_once, reference_frames_more_than_scene_capacity, camera_tracking,
+viewer_draws_in_both_modes) need a display; on a headless machine, use xvfb-run.
 */
 
 #include "dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h"
 #include "dqrobotics_extensions/interfaces/mujoco/robots/GenericManipulatorRobot.h"
 #include "dqrobotics_extensions/interfaces/mujoco/robots/GenericQuadrupedRobot.h"
 #include <GLFW/glfw3.h>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <functional>
@@ -32,6 +34,7 @@ display; on a headless machine, use xvfb-run.
 #include <iterator>
 #include <map>
 #include <random>
+#include <thread>
 
 using namespace DQ_robotics;
 using namespace DQ_robotics_extensions;
@@ -75,6 +78,31 @@ static VectorXd vec(std::initializer_list<double> values)
     for (double value : values)
         v(i++) = value;
     return v;
+}
+
+// GLFW errors of any thread. The viewer draws in its own thread, and glfwGetError() only reports
+// the errors of the calling thread, so the window tests count them with an error callback.
+static std::atomic<int> glfw_errors{0};
+static void count_glfw_error(int error, const char* description)
+{
+    std::cerr << "GLFW error " << error << ": " << description << std::endl;
+    glfw_errors++;
+}
+
+static void sleep_for(const double& seconds)
+{
+    std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
+}
+
+// Lets the viewer thread draw for a while, processing the window events as a main loop would
+static void show_for(const DQ_MujocoInterface& mi, const double& seconds)
+{
+    const auto end = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    while (std::chrono::steady_clock::now() < end)
+    {
+        mi.should_close_window();
+        sleep_for(0.005);
+    }
 }
 
 static DQ test_pose()
@@ -212,6 +240,7 @@ static void reset_restores_joints_and_sites()
 static void load_model_twice()
 {
     // Windowed, to check that the window and render context are reused for the new model
+    glfwSetErrorCallback(count_glfw_error);
     DQ_MujocoInterface mi;
     mi.load_model("test_scene.xml");
     mi.get_joint_positions({"hinge"});  // caches the handle of "hinge"
@@ -221,7 +250,8 @@ static void load_model_twice()
     // Handles cached for the previous model must not be reused
     CHECK_THROWS(std::runtime_error, mi.get_joint_positions({"hinge"}));
     mi.trigger_next_simulation_step();
-    mi.render();
+    show_for(mi, 0.1);
+    CHECK(glfw_errors == 0);
 }
 
 static void destroy_without_loading()
@@ -240,7 +270,6 @@ static void headless_mode_needs_no_display()
     mi.set_joint_target_positions({"hinge2"}, vec({0.5}));
     for (int i = 0; i < 100; i++)
         mi.trigger_next_simulation_step();
-    mi.render();  // does nothing
     CHECK(!mi.should_close_window());
     CHECK(mi.get_joint_positions({"hinge2"})(0) > 0.0);  // the servo moved the joint
 }
@@ -282,6 +311,7 @@ static void reference_frames_more_than_scene_capacity()
 {
     // 1000 labeled frames need 4000 geoms, more than the scene holds: the extra frames
     // must be skipped without crashing or corrupting the rendering
+    glfwSetErrorCallback(count_glfw_error);
     DQ_MujocoInterface mi;
     mi.load_model("test_scene.xml");
     for (int i = 0; i < 1000; i++)
@@ -290,35 +320,27 @@ static void reference_frames_more_than_scene_capacity()
         mi.add_reference_frame(name);
         mi.set_reference_frame_pose(name, 1 + 0.5*E_*(0.001*i*i_));
     }
-    glfwGetError(nullptr);  // clear any previous error
-    for (int i = 0; i < 3; i++)
-    {
-        mi.trigger_next_simulation_step();
-        mi.render();
-    }
-    CHECK(glfwGetError(nullptr) == GLFW_NO_ERROR);
+    mi.trigger_next_simulation_step();
+    show_for(mi, 0.2);
+    CHECK(glfw_errors == 0);
 }
 
 static void two_interfaces_at_once()
 {
+    glfwSetErrorCallback(count_glfw_error);
     DQ_MujocoInterface a;
     a.load_model("test_scene.xml");
     {
         DQ_MujocoInterface b;
         b.load_model("pendulum.xml");
-        a.render();
-        b.render();
+        b.start_simulation();
+        show_for(a, 0.1);  // both viewers draw, and b runs in real time
     }
-    glfwGetError(nullptr);  // clear any previous error
 
-    // Destroying b must not close a's window or shut down GLFW
+    // Destroying b (while running) must not close a's window or shut down GLFW
     a.trigger_next_simulation_step();
-    a.render();
-    const char* description = nullptr;
-    const int error = glfwGetError(&description);
-    if (error != GLFW_NO_ERROR)
-        throw std::runtime_error(std::string("GLFW error after destroying the other interface: ")
-                                 + (description ? description : std::to_string(error)));
+    show_for(a, 0.1);
+    CHECK(glfw_errors == 0);
     CHECK(!a.should_close_window());
 }
 
@@ -773,25 +795,131 @@ static void generic_quadruped_kinematics()
 static void camera_tracking()
 {
     // Windowed, so that the tracking camera is actually used by the renderer
+    glfwSetErrorCallback(count_glfw_error);
     DQ_MujocoInterface mi;
     mi.load_model("floating_base.xml");
     mi.set_camera_tracking("base");
     mi.set_base_pose("base", 1 + 0.5*E_*(5.0*i_ + 3.0*j_ + 2.0*k_));
-    glfwGetError(nullptr);  // clear any previous error
-    for (int i = 0; i < 3; i++)
-    {
-        mi.trigger_next_simulation_step();
-        mi.render();
-    }
+    mi.trigger_next_simulation_step();
+    show_for(mi, 0.1);
     mi.set_camera_tracking("");  // back to a free camera
-    mi.render();
-    CHECK(glfwGetError(nullptr) == GLFW_NO_ERROR);
+    show_for(mi, 0.05);
     CHECK_THROWS(std::runtime_error, mi.set_camera_tracking("unknown"));
 
     // The tracked body id must not leak into another model
     mi.set_camera_tracking("tail");
     mi.load_model("pendulum.xml");
-    mi.render();
+    show_for(mi, 0.1);
+    CHECK(glfw_errors == 0);
+}
+
+static void real_time_simulation()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("test_scene.xml");
+    CHECK(!mi.is_simulation_running());
+    CHECK_NEAR(mi.get_real_time_factor(), 0.0);
+
+    // The simulation time follows the wall-clock time
+    mi.start_simulation();
+    mi.start_simulation();  // does nothing when running
+    CHECK(mi.is_simulation_running());
+    const auto start = std::chrono::steady_clock::now();
+    sleep_for(1.2);
+    const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    const double simulated = mi.get_simulation_time();
+    CHECK(std::abs(simulated - wall) < 0.05);
+    CHECK(std::abs(mi.get_real_time_factor() - 1.0) < 0.05);
+
+    // It cannot be stepped by hand while running
+    CHECK_THROWS(std::runtime_error, mi.trigger_next_simulation_step());
+
+    // Stopping keeps the state, and the time stops
+    mi.stop_simulation();
+    mi.stop_simulation();  // does nothing when stopped
+    CHECK(!mi.is_simulation_running());
+    const double t_stop = mi.get_simulation_time();
+    sleep_for(0.1);
+    CHECK_NEAR(mi.get_simulation_time(), t_stop);
+    mi.trigger_next_simulation_step();
+    CHECK(mi.get_simulation_time() > t_stop);
+
+    // Restarting continues from the current time, without jumping to make up for the pause
+    const double t_restart = mi.get_simulation_time();
+    mi.start_simulation();
+    sleep_for(0.3);
+    const double advanced = mi.get_simulation_time() - t_restart;
+    CHECK(advanced > 0.25 && advanced < 0.35);
+}
+
+static void commands_and_teleports_while_running()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("test_scene.xml");
+    mi.start_simulation();
+
+    // Commands are applied by the physics thread
+    mi.set_joint_target_forces({"hinge"}, vec({3.0}));
+    mi.set_joint_target_positions({"hinge2"}, vec({0.5}));
+    sleep_for(0.5);
+    CHECK_NEAR(mi.get_joint_forces({"hinge"})(0), 3.0);
+    CHECK(mi.get_joint_positions({"hinge2"})(0) > 0.1);  // the servo moves the joint
+
+    // Teleports take effect at once (the getters see them before the next step)
+    mi.set_joint_target_forces({"hinge"}, vec({0.0}));
+    mi.set_joint_positions({"hinge"}, vec({1.0}));
+    CHECK_NEAR(mi.get_joint_positions({"hinge"})(0), 1.0);
+    const DQ x = test_pose();
+    mi.set_base_pose("box", x);
+    CHECK_NEAR(pose_error(mi.get_base_pose("box"), x), 0.0);
+    mi.set_site_pose("world_site", x);
+    CHECK_NEAR(pose_error(mi.get_site_pose("world_site"), x), 0.0);
+
+    // The box falls in real time from the teleported pose
+    sleep_for(0.2);
+    CHECK(mi.get_base_pose("box").translation().q(3) < x.translation().q(3) - 0.05);
+
+    // A reset takes the time back, and the simulation keeps real time from there
+    mi.reset_simulation();
+    CHECK(mi.get_simulation_time() < 0.01);
+    CHECK_NEAR(mi.get_joint_positions({"hinge"})(0), 0.0);
+    sleep_for(0.3);
+    const double t = mi.get_simulation_time();
+    CHECK(t > 0.25 && t < 0.35);
+
+    // Loading a model stops the simulation
+    mi.load_model("pendulum.xml");
+    CHECK(!mi.is_simulation_running());
+}
+
+static void viewer_draws_in_both_modes()
+{
+    // The window is drawn by the viewer thread, both when stepping by hand and in real time
+    glfwSetErrorCallback(count_glfw_error);
+    {
+        DQ_MujocoInterface mi;
+        mi.load_model("floating_base.xml");
+        mi.add_reference_frame("x");
+        for (int i = 0; i < 50; i++)
+        {
+            mi.trigger_next_simulation_step();
+            mi.set_reference_frame_pose("x", mi.get_body_pose("base"));
+        }
+        show_for(mi, 0.1);
+
+        mi.start_simulation();
+        mi.set_camera_tracking("base");
+        mi.set_wireframe_view(true);
+        const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+        while (std::chrono::steady_clock::now() < end && !mi.should_close_window())
+        {
+            mi.set_reference_frame_pose("x", mi.get_body_pose("base"));
+            sleep_for(0.002);
+        }
+        CHECK(mi.get_simulation_time() > 0.25);
+        // destroyed while running
+    }
+    CHECK(glfw_errors == 0);
 }
 
 /*********************************************
@@ -824,6 +952,9 @@ int main(int argc, char** argv)
         {"joint_and_floating_base_names", joint_and_floating_base_names},
         {"reset_to_keyframe", reset_to_keyframe},
         {"camera_tracking", camera_tracking},
+        {"real_time_simulation", real_time_simulation},
+        {"commands_and_teleports_while_running", commands_and_teleports_while_running},
+        {"viewer_draws_in_both_modes", viewer_draws_in_both_modes},
         {"load_model_from_memory", load_model_from_memory},
         {"load_model_from_memory_errors", load_model_from_memory_errors},
         {"embedded_model_with_assets", embedded_model_with_assets},
