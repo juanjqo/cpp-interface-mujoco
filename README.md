@@ -380,7 +380,6 @@ const DQ x_trunk = mi.get_base_pose(robot.floating_base);
 const VectorXd q_FL = mi.get_joint_positions({robot.joint_names.at(0), robot.joint_names.at(1)});
 
 DQ x_foot = x_trunk*legs.at(0).fkm(q_FL);                       // = mi.get_site_pose("FL_foot")
-MatrixXd J_foot = hamiplus8(x_trunk)*legs.at(0).pose_jacobian(q_FL);  // world frame, w.r.t. q_FL
 ```
 
 The models live in [`robots/models`](robots/models). At build time, `dq_mujoco_embed_model()`
