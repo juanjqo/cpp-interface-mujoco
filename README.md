@@ -24,6 +24,8 @@ DQ Robotics can drive a MuJoCo simulation using joint names and dual-quaternion 
 - Simulation reset, to the initial configuration or to a keyframe of the model
 - Headless mode (no window) for automated tests, CI and batch experiments
 - Robots library: robot models embedded in the library, loaded by including a header (no model files needed)
+- Scene builder: build a scene in code (floor, lights, boxes, spheres, cylinders, capsules, sites and robots, posed
+  with dual quaternions), and edit it while it runs: add or remove objects and robots without resetting the simulation
 - CMake package: `find_package(dqrobotics-interface-mujoco)` and the targets `dqrobotics_extensions::interface-mujoco`
   and `dqrobotics_extensions::interface-mujoco-robots`
 
@@ -134,6 +136,7 @@ cd ~/git/cpp-interface-mujoco/build/examples
 ./reference_frames
 ./floating_base
 ./twist_open_loop
+./scene_builder
 ```
 
 | Example | What it shows |
@@ -142,10 +145,12 @@ cd ~/git/cpp-interface-mujoco/build/examples
 | [`site_poses`](examples/site_poses.cpp) | Moves a free-standing `target` frame with `set_site_pose` and reads the `end_effector` frame with `get_site_pose` |
 | [`reference_frames`](examples/reference_frames.cpp) | Draws desired, measured and fixed reference frames, plus a trail of past poses created and removed on the fly |
 | [`floating_base`](examples/floating_base.cpp) | A quadruped starts from its `home` keyframe, rocks its trunk with the leg actuators and gets pushed with `set_base_twist`; the camera follows it |
+| [`scene_builder`](examples/scene_builder.cpp) | Builds a scene in code (a table, two quadrupeds and an arm) and edits it while it runs in real time: a ball is dropped every 2 s and the oldest is removed; the arm's kinematics, moved to where it was placed, are drawn on its end effector |
 | [`twist_open_loop`](examples/twist_open_loop.cpp) | Stepped simulation paced by a sas `Clock`: commands a floating box with constant twists (no feedback) in `WORLD_FRAME` and `BODY_FRAME`, before every step: rise, orbit the world z axis, spin in place, drive in a circle, descend |
 
-The first three examples use `GenericManipulatorRobot`, a generic 6-DoF arm, and `floating_base` uses
-`GenericQuadrupedRobot`, both from the [robots library](#robots-library), so they need no model files.
+The first three examples use `GenericManipulatorRobot`, a generic 6-DoF arm, `floating_base` uses
+`GenericQuadrupedRobot`, and `scene_builder` uses both, all from the [robots library](#robots-library), so they need no
+model files.
 `twist_open_loop` uses [`examples/models/floating_box.xml`](examples/models/floating_box.xml), a box with gravity
 compensation, which is copied next to the executables at build time.
 
@@ -387,6 +392,66 @@ The models live in [`robots/models`](robots/models). At build time, `dq_mujoco_e
 meshes, textures and `<include>` files) into a C++ function that returns a `DQ_MujocoModel`. Steps to add a robot are
 in [`robots/CMakeLists.txt`](robots/CMakeLists.txt). Configure with `-DDQ_MUJOCO_BUILD_ROBOTS=OFF` to skip the library.
 
+### Scene builder
+
+`DQ_MujocoSceneBuilder` builds a scene in code. Everything is posed with unit dual quaternions, and `build()` returns
+a `DQ_MujocoModel` for `load_model()` (its `xml` can also be saved to a file):
+
+```cpp
+#include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoSceneBuilder.h>
+using BODY = DQ_MujocoSceneBuilder::BODY;
+
+DQ_MujocoSceneBuilder scene("pick and place");
+scene.set_timestep(0.002);                                     // physics options belong to the scene
+scene.add_floor();
+scene.add_light("sun", 3*k_, -1.0*k_, true);                   // position, direction, directional
+scene.add_box("table", x_table, {0.25, 0.25, 0.2});            // FIXED: welded to the world
+scene.add_sphere("ball", x_ball, 0.04, BODY::FREE, {1, 0, 0, 1}, 0.1);  // FREE: a floating base
+scene.add_site("target", x_target);                            // movable with set_site_pose()
+
+auto arm = scene.add_robot(GenericManipulatorRobot::description(), "arm_", x_arm);
+auto dog = scene.add_robot(GenericQuadrupedRobot::description(), "dog_", x_dog);
+// arm.joint_names = {"arm_joint1", ...}, dog.floating_base = "dog_trunk", ...
+
+mi.load_model(scene.build());
+mi.reset_simulation("home");   // every robot at its home configuration, where it was placed
+```
+
+- **Robots** are added with a prefix for all their names, so a robot can be added several times. `add_robot()`
+  returns the description of the placed robot (prefixed names). Only the robot itself is added: the floor, lights and
+  sky of its model are not, nor its unused materials and textures, and the physics options are those of the scene.
+- **The "home" keyframe** of the scene has each robot at its own home keyframe, moved to where it was placed (MuJoCo
+  does not move the keyframes of attached floating-base robots), and every other element at its initial pose.
+- **Free objects** (`BODY::FREE`) fall, collide and can be pushed; they are floating bases, so `get_base_pose`,
+  `set_base_twist`, etc. work with their names. `BODY::FIXED` objects are welded to the world.
+- **Kinematics** of a placed robot: move its reference frame to where it was placed,
+  `kinematics.set_reference_frame(x_arm*kinematics.get_reference_frame())`.
+- **Not yet supported:** robots with asset files (meshes, textures), e.g., MuJoCo Menagerie models.
+
+#### Editing a scene while it runs
+
+`edit_scene()` edits the loaded scene with the same methods, also while the simulation runs in real time. The state is
+kept: the scene changes without a reset, and new objects and robots start at their home configuration.
+
+```cpp
+mi.start_simulation();
+...
+mi.edit_scene([&](DQ_MujocoSceneBuilder& scene) {
+    scene.add_sphere("ball_2", x, 0.04, BODY::FREE);
+    scene.remove("ball_1");                                     // objects, sites, lights, the floor
+    scene.add_robot(GenericManipulatorRobot::description(), "arm2_", x_arm2);
+});
+mi.edit_scene([](DQ_MujocoSceneBuilder& scene) { scene.remove("arm2_base"); });  // a robot, by its root body
+```
+
+- It works with any loaded model (from a file, from memory, or built), and keeps its "home" keyframe up to date.
+- Edits are checked before they are applied: if one makes the scene invalid (e.g., a name already in use), or the
+  function throws, the scene is left unchanged and the exception is rethrown.
+- An edit takes about 10 ms with the example scenes. A real-time simulation keeps running: it waits while the model
+  is recompiled and then catches up. Site poses set with `set_site_pose()`, the camera and the reference frames are
+  kept.
+- Call it from the main thread.
+
 ### Models in memory
 
 `load_model` also accepts a `DQ_MujocoModel`: the XML text plus the files it refers to, keyed by their path relative
@@ -435,7 +500,8 @@ but not drawn.
 |---|---|
 | `DQ_MujocoInterface(rendering, title, width, height)` | All arguments are optional (default: a 1280x920 window titled with the model name) |
 | `load_model(xml)` | Load an MJCF file and open the viewer window (unless headless). Can be called again to switch models |
-| `load_model(model)` | Same, from a `DQ_MujocoModel` held in memory (e.g., `GenericQuadrupedRobot::description().model`) |
+| `load_model(model)` | Same, from a `DQ_MujocoModel` held in memory (e.g., `GenericQuadrupedRobot::description().model` or `DQ_MujocoSceneBuilder::build()`) |
+| `edit_scene(edit)` | Edit the loaded scene with a `DQ_MujocoSceneBuilder` (add/remove objects, lights, sites, robots), also while it runs; the state is kept |
 | `start_simulation()` / `stop_simulation()` / `is_simulation_running()` | Run the simulation in real time in a physics thread / stop it (the state is kept) / whether it runs |
 | `get_real_time_factor()` | Simulated time per wall-clock time over the last 0.5 s (0 when not running) |
 | `trigger_next_simulation_step()` | Advance the simulation by one timestep (`mj_step`), when it is not running in real time |
@@ -455,6 +521,20 @@ but not drawn.
 | `add_reference_frame(name, length, width, opacity, label)` / `remove_reference_frame(name)` | Create or remove a frame that is only drawn (no XML needed) |
 | `set_reference_frame_pose(name, x)` / `get_reference_frame_pose(name)` | Pose of a reference frame as a unit dual quaternion |
 | `set_wireframe_view`, `set_joint_view`, `set_contact_view`, `set_center_of_mass_view`, `set_site_frame_view` | Visualization toggles |
+
+`DQ_MujocoSceneBuilder`:
+
+| Method | Description |
+|---|---|
+| `DQ_MujocoSceneBuilder(name)` | An empty scene with a sky and a headlight (timestep 0.002 s, `IMPLICITFAST` integrator) |
+| `set_timestep(dt)` / `set_integrator(integrator)` / `set_gravity(g)` | Physics options of the scene |
+| `add_floor(name)` | An infinite checkered floor at z = 0 |
+| `add_light(name, position, direction, directional)` | A spot or directional light |
+| `add_box/sphere/cylinder/capsule(name, x, sizes..., body, rgba, mass)` | A primitive object, `FIXED` or `FREE` |
+| `add_site(name, x, size, rgba)` | A site in the world (a frame without physics) |
+| `add_robot(robot, prefix, x)` | A robot (e.g., of the robots library), placed at `x`; returns its description in the scene |
+| `remove(name)` | Remove an object, site, light, the floor, or a robot (by its prefixed root body) |
+| `build()` | The scene as a `DQ_MujocoModel`, with a "home" keyframe |
 
 ## License
 

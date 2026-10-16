@@ -10,7 +10,7 @@ It uses DQ Robotics (https://dqrobotics.github.io) but is not part of DQ Robotic
 
 #pragma once
 #include <dqrobotics/robot_modeling/DQ_SerialManipulatorDH.h>
-#include <dqrobotics_extensions/interfaces/mujoco/robots/DQ_MujocoRobotDescription.h>
+#include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoRobotDescription.h>
 #include <vector>
 
 namespace DQ_robotics_extensions

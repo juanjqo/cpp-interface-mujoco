@@ -48,6 +48,11 @@ set(TESTS
     joint_and_floating_base_names
     reset_to_keyframe
     camera_tracking
+    scene_builder_build
+    scene_builder_options_and_errors
+    edit_scene_while_running
+    edit_scene_of_a_model_file
+    edit_scene_with_window
     real_time_simulation
     commands_and_teleports_while_running
     viewer_draws_in_both_modes

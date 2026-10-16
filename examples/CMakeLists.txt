@@ -14,6 +14,7 @@ set(ROBOT_EXAMPLES
     site_poses
     reference_frames
     floating_base
+    scene_builder
 )
 if(DQ_MUJOCO_BUILD_ROBOTS)
     list(APPEND EXAMPLES ${ROBOT_EXAMPLES})

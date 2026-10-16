@@ -11,6 +11,8 @@ It uses DQ Robotics (https://dqrobotics.github.io) but is not part of DQ Robotic
 #pragma once
 #include <dqrobotics/DQ.h>
 #include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoModel.h>
+#include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoSceneBuilder.h>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -60,6 +62,8 @@ public:
 
     void load_model(const std::string& xml_model);
     void load_model(const DQ_MujocoModel& model);
+    // Edit the loaded scene (add/remove objects, robots, ...), also while it runs; the state is kept
+    void edit_scene(const std::function<void(DQ_MujocoSceneBuilder&)>& edit);
 
 
     // Two ways to run the simulation (the window, if any, is drawn by a viewer thread in both):
