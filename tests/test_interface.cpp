@@ -8,8 +8,8 @@ or a single one (this is how CTest calls them) with
 
 The tests must run from the directory that contains the test models (CTest does this).
 Most tests run in HEADLESS mode. The ones that check the window (load_model_twice,
-two_interfaces_at_once, reference_frames_more_than_scene_capacity) need a display; on a
-headless machine, use xvfb-run.
+two_interfaces_at_once, reference_frames_more_than_scene_capacity, camera_tracking) need a
+display; on a headless machine, use xvfb-run.
 */
 
 #include "dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h"
@@ -308,6 +308,218 @@ static void two_interfaces_at_once()
     CHECK(!a.should_close_window());
 }
 
+static void base_pose_set_and_get()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("floating_base.xml");
+    const DQ x = test_pose();
+    mi.set_base_pose("base", x);
+    CHECK_NEAR(pose_error(mi.get_base_pose("base"), x), 0.0);
+    // The body frame is updated immediately
+    CHECK_NEAR(pose_error(mi.get_body_pose("base"), x), 0.0);
+    // ...and so are the frames attached to the base: the foot is 0.4 m below the base origin
+    const DQ x_foot = x*(1 + 0.5*E_*(-0.4*k_));
+    CHECK_NEAR(pose_error(mi.get_site_pose("foot").translation(), x_foot.translation()), 0.0);
+
+    // Invalid calls
+    CHECK_THROWS(std::runtime_error, mi.set_base_pose("base", 2.0*x));  // not unit
+    CHECK_THROWS(std::runtime_error, mi.get_base_pose("leg"));          // no free joint
+    CHECK_THROWS(std::runtime_error, mi.get_base_pose("unknown"));
+    CHECK_THROWS(std::runtime_error, mi.get_body_pose("unknown"));
+}
+
+static void base_twist_matches_motion()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("floating_base.xml");
+    // A rotated base away from the origin, so that mixing up the frames of the free joint
+    // velocity (linear: world, angular: body) or forgetting cross(p, w) changes the result
+    const DQ x0 = test_pose();
+    mi.set_base_pose("base", x0);
+    const DQ w = 0.3*i_ - 0.5*j_ + 0.8*k_;
+    const DQ p_dot = 0.2*i_ + 0.1*j_ - 0.4*k_;
+    const DQ xi = w + E_*(p_dot + cross(x0.translation(), w));
+    mi.set_base_twist("base", xi);
+    CHECK_NEAR(vec8(mi.get_base_twist("base") - xi).norm(), 0.0);
+
+    // One step of the free motion must agree with x_dot = 0.5*xi*x (no gravity, small timestep)
+    const double t0 = mi.get_simulation_time();
+    mi.trigger_next_simulation_step();
+    const double dt = mi.get_simulation_time() - t0;
+    const DQ x_dot = (1.0/dt)*(mi.get_base_pose("base") - x0);
+    CHECK(vec8(x_dot - 0.5*xi*x0).norm() < 1e-3);
+
+    CHECK_THROWS(std::runtime_error, mi.set_base_twist("base", 1 + xi));  // not pure
+}
+
+static void base_twist_reference_frames()
+{
+    // Checks the frame conventions stated in the documentation of get/set_base_twist() against
+    // one step of the free motion (no gravity, small timestep)
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("floating_base.xml");
+    const DQ x0 = test_pose();
+    const DQ r0 = x0.P();
+    const DQ p0 = x0.translation();
+    const DQ w = 0.3*i_ - 0.5*j_ + 0.8*k_;
+
+    // xi = w + E_*cross(p, w) spins the body in place: its origin does not move
+    mi.set_base_pose("base", x0);
+    mi.set_base_twist("base", w + E_*cross(p0, w));
+    double t0 = mi.get_simulation_time();
+    mi.trigger_next_simulation_step();
+    double dt = mi.get_simulation_time() - t0;
+    CHECK((mi.get_base_pose("base").translation() - p0).vec3().norm()/dt < 1e-3);
+
+    // xi = w alone rotates the body about the world origin: its origin moves with velocity cross(w, p)
+    mi.set_base_pose("base", x0);
+    mi.set_base_twist("base", w);
+    t0 = mi.get_simulation_time();
+    mi.trigger_next_simulation_step();
+    dt = mi.get_simulation_time() - t0;
+    const DQ p_dot = (1.0/dt)*(mi.get_base_pose("base").translation() - p0);
+    CHECK(vec4(p_dot - cross(w, p0)).norm() < 1e-3);
+
+    // BODY_FRAME: the twist is Ad(conj(x), xi), made of the angular velocity and the velocity of
+    // the body origin, both expressed in the body frame
+    using RF = DQ_MujocoInterface::REFERENCE_FRAME;
+    const DQ v = 0.2*i_ + 0.1*j_ - 0.4*k_;
+    const DQ xi = w + E_*(v + cross(p0, w));
+    mi.set_base_pose("base", x0);
+    mi.set_base_twist("base", xi);
+    const DQ xi_body = mi.get_base_twist("base", RF::BODY_FRAME);
+    CHECK_NEAR(vec8(xi_body - Ad(conj(x0), xi)).norm(), 0.0);
+    t0 = mi.get_simulation_time();
+    mi.trigger_next_simulation_step();
+    dt = mi.get_simulation_time() - t0;
+    const DQ x1 = mi.get_base_pose("base");
+    const DQ w_body = (2.0/dt)*(conj(r0)*x1.P() - 1);   // r1 = r0*(1 + 0.5*w_body*dt)
+    const DQ v_body = (1.0/dt)*(conj(r0)*(x1.translation() - p0)*r0);
+    CHECK(vec4(w_body - xi_body.P()).norm() < 1e-3);
+    CHECK(vec4(v_body - xi_body.D()).norm() < 1e-3);
+
+    // Setting in BODY_FRAME is the inverse, and gives the same motion as the world-frame twist
+    mi.set_base_pose("base", x0);
+    mi.set_base_twist("base", xi_body, RF::BODY_FRAME);
+    CHECK_NEAR(vec8(mi.get_base_twist("base", RF::BODY_FRAME) - xi_body).norm(), 0.0);
+    CHECK_NEAR(vec8(mi.get_base_twist("base", RF::WORLD_FRAME) - xi).norm(), 0.0);
+
+    // In BODY_FRAME, an angular velocity alone spins the body in place
+    mi.set_base_pose("base", x0);
+    mi.set_base_twist("base", w, RF::BODY_FRAME);
+    t0 = mi.get_simulation_time();
+    mi.trigger_next_simulation_step();
+    dt = mi.get_simulation_time() - t0;
+    CHECK((mi.get_base_pose("base").translation() - p0).vec3().norm()/dt < 1e-3);
+
+    CHECK_THROWS(std::runtime_error, mi.set_base_twist("base", 1 + xi, RF::BODY_FRAME));  // not pure
+}
+
+static void base_falls_under_gravity()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("test_scene.xml");
+    // "box" starts at (1, 1, 1) at rest, with nothing below it
+    const int steps = 100;
+    for (int i = 0; i < steps; i++)
+        mi.trigger_next_simulation_step();
+    const double t = mi.get_simulation_time();
+    // No rotation, so the twist is just the linear velocity -g*t (exact for MuJoCo's Euler integrator)
+    CHECK_NEAR(vec8(mi.get_base_twist("box") - E_*(-9.81*t*k_)).norm(), 0.0);
+    VectorXd p = mi.get_base_pose("box").translation().vec3();
+    CHECK_NEAR(p(0), 1.0);
+    CHECK_NEAR(p(1), 1.0);
+    CHECK(std::abs(p(2) - (1.0 - 0.5*9.81*t*t)) < 1e-2);
+}
+
+static void joint_methods_reject_free_and_ball_joints()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("test_scene.xml");
+    CHECK_THROWS(std::invalid_argument, mi.get_joint_positions({"box_free"}));
+    CHECK_THROWS(std::invalid_argument, mi.set_joint_positions({"box_free"}, vec({0.1})));
+    CHECK_THROWS(std::invalid_argument, mi.get_joint_velocities({"box_free"}));
+    CHECK_THROWS(std::invalid_argument, mi.get_joint_forces({"box_free"}));
+    try
+    {
+        mi.get_joint_positions({"box_free"});
+    }
+    catch (const std::invalid_argument& e)
+    {
+        // The message points to the base methods and the body to use
+        CHECK(std::string(e.what()).find("get_base_pose") != std::string::npos);
+        CHECK(std::string(e.what()).find("\"box\"") != std::string::npos);
+    }
+
+    mi.load_model("floating_base.xml");
+    CHECK_THROWS(std::invalid_argument, mi.get_joint_positions({"tail_ball"}));
+    CHECK_THROWS(std::invalid_argument, mi.set_joint_positions({"tail_ball"}, vec({0.1})));
+}
+
+static void joint_and_floating_base_names()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("test_scene.xml");
+    CHECK((mi.get_joint_names() == std::vector<std::string>{"box_free", "hinge", "hinge2"}));
+    CHECK((mi.get_joint_names(true) == std::vector<std::string>{"hinge", "hinge2"}));
+    CHECK(mi.get_floating_base_names() == std::vector<std::string>{"box"});
+
+    // The free joint is unnamed and "tail_ball" has 3 DoFs
+    mi.load_model("floating_base.xml");
+    CHECK(mi.get_joint_names(true) == std::vector<std::string>{"hip"});
+    CHECK(mi.get_floating_base_names() == std::vector<std::string>{"base"});
+
+    mi.load_model("pendulum.xml");
+    CHECK(mi.get_floating_base_names().empty());
+}
+
+static void reset_to_keyframe()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("floating_base.xml");
+    for (int i = 0; i < 10; i++)
+        mi.trigger_next_simulation_step();
+
+    mi.reset_simulation("home");
+    CHECK_NEAR(mi.get_simulation_time(), 0.0);
+    const DQ r = cos(M_PI/4) + k_*sin(M_PI/4);
+    const DQ x_home = r + 0.5*E_*(0.5*i_ - 0.2*j_ + 2.0*k_)*r;
+    CHECK_NEAR(pose_error(mi.get_base_pose("base"), x_home), 0.0);
+    CHECK_NEAR(pose_error(mi.get_body_pose("base"), x_home), 0.0);
+    CHECK_NEAR(mi.get_joint_positions({"hip"})(0), 0.3);
+
+    // Without a keyframe, the reset goes back to the configuration in the XML
+    mi.reset_simulation();
+    CHECK_NEAR(pose_error(mi.get_base_pose("base"), 1 + 0.5*E_*k_), 0.0);
+    CHECK_NEAR(mi.get_joint_positions({"hip"})(0), 0.0);
+
+    CHECK_THROWS(std::runtime_error, mi.reset_simulation("unknown"));
+}
+
+static void camera_tracking()
+{
+    // Windowed, so that the tracking camera is actually used by the renderer
+    DQ_MujocoInterface mi;
+    mi.load_model("floating_base.xml");
+    mi.set_camera_tracking("base");
+    mi.set_base_pose("base", 1 + 0.5*E_*(5.0*i_ + 3.0*j_ + 2.0*k_));
+    glfwGetError(nullptr);  // clear any previous error
+    for (int i = 0; i < 3; i++)
+    {
+        mi.trigger_next_simulation_step();
+        mi.render();
+    }
+    mi.set_camera_tracking("");  // back to a free camera
+    mi.render();
+    CHECK(glfwGetError(nullptr) == GLFW_NO_ERROR);
+    CHECK_THROWS(std::runtime_error, mi.set_camera_tracking("unknown"));
+
+    // The tracked body id must not leak into another model
+    mi.set_camera_tracking("tail");
+    mi.load_model("pendulum.xml");
+    mi.render();
+}
+
 /*********************************************
  * RUNNER
  * *******************************************/
@@ -330,6 +542,14 @@ int main(int argc, char** argv)
         {"headless_mode_needs_no_display", headless_mode_needs_no_display},
         {"reference_frames_api", reference_frames_api},
         {"reference_frames_more_than_scene_capacity", reference_frames_more_than_scene_capacity},
+        {"base_pose_set_and_get", base_pose_set_and_get},
+        {"base_twist_matches_motion", base_twist_matches_motion},
+        {"base_twist_reference_frames", base_twist_reference_frames},
+        {"base_falls_under_gravity", base_falls_under_gravity},
+        {"joint_methods_reject_free_and_ball_joints", joint_methods_reject_free_and_ball_joints},
+        {"joint_and_floating_base_names", joint_and_floating_base_names},
+        {"reset_to_keyframe", reset_to_keyframe},
+        {"camera_tracking", camera_tracking},
     };
 
     std::vector<std::string> selected;

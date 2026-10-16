@@ -28,6 +28,14 @@ set(TESTS
     headless_mode_needs_no_display
     reference_frames_api
     reference_frames_more_than_scene_capacity
+    base_pose_set_and_get
+    base_twist_matches_motion
+    base_twist_reference_frames
+    base_falls_under_gravity
+    joint_methods_reject_free_and_ball_joints
+    joint_and_floating_base_names
+    reset_to_keyframe
+    camera_tracking
 )
 foreach(test_name IN LISTS TESTS)
     add_test(NAME ${test_name}

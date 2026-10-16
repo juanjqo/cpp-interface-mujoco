@@ -50,6 +50,17 @@ public:
     };
 
     /**
+     * @brief Frame in which a twist is expressed (see get_base_twist() and set_base_twist()).
+     *  WORLD_FRAME: world frame, reference point at the world origin (x_dot = 0.5*xi*x).
+     *  BODY_FRAME:  body frame, reference point at the body origin (x_dot = 0.5*x*xi).
+     */
+    enum class REFERENCE_FRAME
+    {
+        BODY_FRAME,
+        WORLD_FRAME
+    };
+
+    /**
      * @brief DQ_MujocoInterface
      * @param rendering WINDOW (default) or HEADLESS.
      * @param window_title Title of the window. If empty, the name of the model is used.
@@ -78,14 +89,16 @@ public:
     void set_contact_view(const bool &flag);
     void set_center_of_mass_view(const bool& flag);
     void set_site_frame_view(const bool& flag);
+    void set_camera_tracking(const std::string& bodyname);
 
 
     void reset_simulation();
+    void reset_simulation(const std::string& keyframe);
 
 
 
 
-    std::vector<std::string> get_joint_names() const;
+    std::vector<std::string> get_joint_names(const bool& only_single_dof = false) const;
 
     // Joint space methods
     Eigen::VectorXd get_joint_positions(const std::vector<std::string>& jointnames) const;
@@ -95,6 +108,20 @@ public:
     Eigen::VectorXd get_joint_velocities(const std::vector<std::string>& jointnames) const;
     void            set_joint_target_forces(const std::vector<std::string>& jointnames, const Eigen::VectorXd& forces);
     Eigen::VectorXd get_joint_forces(const std::vector<std::string>& jointnames) const;
+
+    // Floating bases (humanoids, quadrupeds, free objects), addressed by the body that owns the free joint
+    std::vector<std::string> get_floating_base_names() const;
+    DQ_robotics::DQ get_base_pose(const std::string& bodyname) const;
+    void            set_base_pose(const std::string& bodyname, const DQ_robotics::DQ& pose);
+    // WORLD_FRAME: xi = w + E_*(p_dot + cross(p, w)), all in the world frame (x_dot = 0.5*xi*x)
+    // BODY_FRAME:  xi_body = Ad(conj(x), xi), velocities of the body origin in the body frame (x_dot = 0.5*x*xi_body)
+    DQ_robotics::DQ get_base_twist(const std::string& bodyname,
+                                   const REFERENCE_FRAME& reference_frame = REFERENCE_FRAME::WORLD_FRAME) const;
+    void            set_base_twist(const std::string& bodyname,
+                                   const DQ_robotics::DQ& twist,
+                                   const REFERENCE_FRAME& reference_frame = REFERENCE_FRAME::WORLD_FRAME);
+
+    DQ_robotics::DQ get_body_pose(const std::string& bodyname) const;
 
     DQ_robotics::DQ get_site_pose(const std::string& objectname) const;
     void set_site_pose(const std::string& objectname, const DQ_robotics::DQ& pose);

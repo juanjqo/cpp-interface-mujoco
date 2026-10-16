@@ -9,6 +9,8 @@ set(EXAMPLES
     joint_control
     site_poses
     reference_frames
+    floating_base
+    twist_open_loop
 )
 foreach(example IN LISTS EXAMPLES)
     add_executable(${example} ${example}.cpp)

@@ -12,10 +12,12 @@ DQ Robotics can drive a MuJoCo simulation using joint names and dual-quaternion 
 - Load an MJCF (XML) model and render it in a GLFW window (mouse orbit/pan/zoom, FPS and simulation-time overlay)
 - Joint space: read positions, velocities and actuator forces; teleport joints; command position, velocity or
   torque actuators
-- Task space: get and set the pose of any site as a unit dual quaternion
+- Task space: get and set the pose of any site, and get the pose of any body, as a unit dual quaternion
+- Floating-base robots (humanoids, quadrupeds): get and set the pose and twist of the base, reset to a keyframe, and
+  make the camera follow the robot
 - Reference frames: draw named frames at runtime from dual quaternion poses, without editing the XML model
 - Visualization toggles: wireframe, joint axes, contact forces, center of mass, site frames
-- Simulation reset
+- Simulation reset, to the initial configuration or to a keyframe of the model
 - Headless mode (no window) for automated tests, CI and batch experiments
 - CMake package: `find_package(dqrobotics-interface-mujoco)` and the target `dqrobotics_extensions::interface-mujoco`
 
@@ -121,6 +123,8 @@ cd ~/git/cpp-interface-mujoco/build/examples
 ./joint_control
 ./site_poses
 ./reference_frames
+./floating_base
+./twist_open_loop
 ```
 
 | Example | What it shows |
@@ -128,9 +132,13 @@ cd ~/git/cpp-interface-mujoco/build/examples
 | [`joint_control`](examples/joint_control.cpp) | Sinusoidal joint references tracked by position actuators; prints joint positions, velocities and torques |
 | [`site_poses`](examples/site_poses.cpp) | Moves a free-standing `target` frame with `set_site_pose` and reads the `end_effector` frame with `get_site_pose` |
 | [`reference_frames`](examples/reference_frames.cpp) | Draws desired, measured and fixed reference frames, plus a trail of past poses created and removed on the fly |
+| [`floating_base`](examples/floating_base.cpp) | A quadruped starts from its `home` keyframe, rocks its trunk with the leg actuators and gets pushed with `set_base_twist`; the camera follows it |
+| [`twist_open_loop`](examples/twist_open_loop.cpp) | Commands a floating box with constant twists (no feedback) in `WORLD_FRAME` and `BODY_FRAME`: rise, orbit the world z axis, spin in place, drive in a circle, descend |
 
-The examples use [`examples/models/manipulator.xml`](examples/models/manipulator.xml), a generic 6-DoF arm built from
-primitive shapes (no mesh files), which is copied next to the executables at build time.
+The first three examples use [`examples/models/manipulator.xml`](examples/models/manipulator.xml), a generic 6-DoF arm,
+`floating_base` uses [`examples/models/quadruped.xml`](examples/models/quadruped.xml), a generic quadruped, and
+`twist_open_loop` uses [`examples/models/floating_box.xml`](examples/models/floating_box.xml), a box with gravity
+compensation. They are built from primitive shapes (no mesh files) and copied next to the executables at build time.
 
 ## Tests
 
@@ -230,6 +238,76 @@ link moves with that link. The example manipulator has both kinds:
 
 Site frames are drawn in the viewer by default; hide them with `set_site_frame_view(false)`.
 
+### Floating-base robots
+
+Humanoids, quadrupeds and free objects have a floating base: a body with a [free joint](https://mujoco.readthedocs.io/en/stable/XMLreference.html#body-freejoint).
+A free joint has 7 positions and 6 velocities, so it is not handled by the joint methods (they throw if you pass it).
+Instead, address the base by the name of its body, which also works for unnamed free joints (`<freejoint/>`, as in most
+[MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie) robots):
+
+```cpp
+mi.load_model("quadruped.xml");
+mi.reset_simulation("home");        // most legged robots need a standing keyframe to start
+mi.set_camera_tracking("trunk");    // keep the robot in view
+
+std::vector<std::string> bases = mi.get_floating_base_names();  // {"trunk"}
+std::vector<std::string> joints = mi.get_joint_names(true);     // only the hinge/slide joints of the limbs
+
+DQ x_base = mi.get_base_pose("trunk");     // pose of the base in the world
+DQ xi_base = mi.get_base_twist("trunk");   // twist of the base in the world frame
+VectorXd q = mi.get_joint_positions(joints);
+DQ x_foot = mi.get_body_pose("FL_calf");   // any body, e.g., a foot or a hand
+```
+
+`x_base` and `q` are the full configuration of the robot: for instance, use `x_base` as the reference frame of the
+`DQ_SerialManipulator` of each leg.
+
+`set_base_pose` and `set_base_twist` write the state directly, like `set_joint_positions`. For a robot that moves
+through its own actuators and contacts (a legged robot), use them only for initialization, resets or disturbances.
+A body without dynamics of its own (e.g., a free-flying object with gravity compensation) can be commanded with a
+twist in every step, as in the [`twist_open_loop`](examples/twist_open_loop.cpp) example.
+
+#### Reference frame of the twist
+
+`get_base_twist` and `set_base_twist` take an optional `DQ_MujocoInterface::REFERENCE_FRAME` that sets the frame of
+the twist. Let `x = r + 0.5*E_*p*r` be the pose of the body, `w` its angular velocity and `p_dot` the linear velocity of
+its origin `p`:
+
+| `reference_frame` | Twist | Primary part | Dual part | Kinematics |
+|---|---|---|---|---|
+| `WORLD_FRAME` (default) | `xi = w + E_*(p_dot + cross(p, w))` | Angular velocity, in the world frame | Linear velocity of the point of the body (extended as a rigid body) that is at the **world origin**, in the world frame | `x_dot = 0.5*xi*x` |
+| `BODY_FRAME` | `xi_body = Ad(conj(x), xi)` | Angular velocity, in the body frame | Linear velocity of the **body origin**, in the body frame | `x_dot = 0.5*x*xi_body` |
+
+In the world frame the dual part is **not** the velocity `p_dot` of the body origin, unless `w = 0` or `p = 0`.
+Converting between velocities and twists:
+
+```cpp
+using RF = DQ_MujocoInterface::REFERENCE_FRAME;
+const DQ x = mi.get_base_pose("box");
+const DQ p = x.translation();
+
+// velocities -> twist
+mi.set_base_twist("box", w + E_*(p_dot + cross(p, w)));                  // w, p_dot in the world frame
+mi.set_base_twist("box", w_body + E_*p_dot_body, RF::BODY_FRAME);        // w_body, p_dot_body in the body frame
+
+// twist -> velocities
+const DQ xi = mi.get_base_twist("box");                                  // same as RF::WORLD_FRAME
+const DQ w_measured = xi.P();
+const DQ p_dot_measured = xi.D() - cross(p, w_measured);
+
+const DQ xi_body = mi.get_base_twist("box", RF::BODY_FRAME);             // equals Ad(conj(x), xi)
+const DQ w_body_measured = xi_body.P();
+const DQ p_dot_body_measured = xi_body.D();
+```
+
+In the world frame, the `cross(p, w)` term matters: `set_base_twist("box", w)` rotates the box about the world
+origin, so its origin moves on a circle. To spin it in place, use `w + E_*cross(p, w)`, or `w_body` alone in
+`BODY_FRAME`.
+
+MuJoCo stores the velocity of a free joint (`qvel`) in a third, mixed form: the linear velocity of the body origin in
+the world frame, followed by the angular velocity in the body frame. The interface converts it, so you never need to
+handle `qvel` directly.
+
 ### Reference frames
 
 To plot a frame (a desired pose, a target, an intermediate frame of your kinematics, ...) you don't need a site in
@@ -264,12 +342,17 @@ but not drawn.
 | `trigger_next_simulation_step()` | Advance the simulation by one timestep (`mj_step`) |
 | `get_simulation_time()` | Simulation time in seconds |
 | `render()` / `should_close_window()` | Draw a frame and process window events / check whether the window was closed (no-op / `false` when headless) |
-| `reset_simulation()` | Reset the state to the model's initial configuration |
-| `get_joint_names()` | Names of all joints in the model |
+| `reset_simulation()` / `reset_simulation(keyframe)` | Reset the state to the model's initial configuration or to a keyframe |
+| `get_joint_names(only_single_dof)` | Names of all joints in the model, or only of the named hinge and slide joints |
 | `get_joint_positions/velocities/forces(names)` | Joint state and actuator forces (`qfrc_actuator`) |
 | `set_joint_positions(names, q)` | Teleport joints (no dynamics) |
 | `set_joint_target_positions/velocities/forces(names, u)` | Actuator commands |
 | `get_site_pose(name)` / `set_site_pose(name, x)` | Site pose as a unit dual quaternion |
+| `get_body_pose(name)` | Body pose as a unit dual quaternion |
+| `get_floating_base_names()` | Bodies with a free joint |
+| `get_base_pose(body)` / `set_base_pose(body, x)` | Floating-base pose as a unit dual quaternion (set: teleport) |
+| `get_base_twist(body, frame)` / `set_base_twist(body, xi, frame)` | Floating-base twist in `WORLD_FRAME` (default, reference point at the world origin) or `BODY_FRAME` (reference point at the body origin) (set: teleport) |
+| `set_camera_tracking(body)` | Make the camera follow a body (empty name: free camera) |
 | `add_reference_frame(name, length, width, opacity, label)` / `remove_reference_frame(name)` | Create or remove a frame that is only drawn (no XML needed) |
 | `set_reference_frame_pose(name, x)` / `get_reference_frame_pose(name)` | Pose of a reference frame as a unit dual quaternion |
 | `set_wireframe_view`, `set_joint_view`, `set_contact_view`, `set_center_of_mass_view`, `set_site_frame_view` | Visualization toggles |

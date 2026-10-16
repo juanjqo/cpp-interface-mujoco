@@ -309,10 +309,15 @@ public:
 
     /**
      * @brief reset resets the simulation state and the site poses to those defined in the XML.
+     * @param keyframe_id Keyframe to reset the state to, or -1 for the initial configuration
+     *        of the model (qpos0).
      */
-    void reset()
+    void reset(const int& keyframe_id = -1)
     {
-        mj_resetData(m_, d_);
+        if (keyframe_id < 0)
+            mj_resetData(m_, d_);
+        else
+            mj_resetDataKeyframe(m_, d_, keyframe_id);
         std::copy(site_pos0_.begin(), site_pos0_.end(), m_->site_pos);
         std::copy(site_quat0_.begin(), site_quat0_.end(), m_->site_quat);
         std::copy(site_sameframe0_.begin(), site_sameframe0_.end(), m_->site_sameframe);
@@ -353,8 +358,9 @@ public:
         //opt_.quality = mjQUALITY_LOW;       // Lowest quality settings
 
 
-        // initialize visualization data structures
-        mjv_defaultCamera(&cam_);
+        // initialize visualization data structures. The free camera starts as set in the model
+        // (<statistic center/extent> and <visual><global azimuth/elevation>).
+        mjv_defaultFreeCamera(m_, &cam_);
         mjv_defaultOption(&opt_);
         mjv_defaultScene(&scn_);
         mjr_defaultContext(&con_);
@@ -581,6 +587,175 @@ public:
         return handle;
     }
 
+    /**
+     * @brief _get_single_dof_joint_handle returns the handle of a hinge or slide joint.
+     *
+     * The joint methods read and write one value per joint, which is only meaningful for joints
+     * with a single DoF. A free joint has 7 positions (x, y, z, qw, qx, qy, qz) and 6 velocities,
+     * and a ball joint has 4 and 3, so reading one value of them would silently return a single
+     * coordinate (e.g., the x position of a floating base).
+     *
+     * @throws std::invalid_argument if the joint is a free or ball joint.
+     */
+    int _get_single_dof_joint_handle(const std::string& jointname)
+    {
+        const int joint_id = _get_handle_from_map(jointname);
+        const int joint_type = m_->jnt_type[joint_id];
+        if (joint_type == mjJNT_FREE)
+        {
+            const char* bodyname = mj_id2name(m_, mjOBJ_BODY, m_->jnt_bodyid[joint_id]);
+            throw std::invalid_argument("The joint \"" + jointname + "\" is a free joint (a floating base). "
+                                        "Use get_base_pose(), set_base_pose(), get_base_twist() or "
+                                        "set_base_twist() with the name of its body (\""
+                                        + std::string(bodyname ? bodyname : "") + "\") instead.");
+        }
+        if (joint_type == mjJNT_BALL)
+            throw std::invalid_argument("The joint \"" + jointname + "\" is a ball joint. The joint "
+                                        "methods only support hinge and slide joints.");
+        return joint_id;
+    }
+
+    /**
+     * @brief _get_body_handle
+     * @throws std::runtime_error if the body does not exist.
+     */
+    int _get_body_handle(const std::string& bodyname) const
+    {
+        const int body_id = mj_name2id(m_, mjOBJ_BODY, bodyname.c_str());
+        if (body_id == -1)
+            throw std::runtime_error("Body '" + bodyname + "' not found");
+        return body_id;
+    }
+
+    /**
+     * @brief _get_free_joint_handle returns the free joint of a floating base.
+     * @param bodyname Name of the body that owns the free joint (e.g., "pelvis" or "trunk").
+     *
+     * Free joints are addressed by their body because they are often unnamed (<freejoint/>).
+     * MuJoCo only accepts a free joint as the single joint of a child of the world body, so its
+     * qpos is the pose of the body in the world.
+     *
+     * @throws std::runtime_error if the body does not exist or has no free joint.
+     */
+    int _get_free_joint_handle(const std::string& bodyname) const
+    {
+        const int body_id = _get_body_handle(bodyname);
+        const int joint_id = m_->body_jntadr[body_id];
+        if (m_->body_jntnum[body_id] != 1 || m_->jnt_type[joint_id] != mjJNT_FREE)
+            throw std::runtime_error("Body '" + bodyname + "' is not a floating base (it has no free joint)");
+        return joint_id;
+    }
+
+    /**
+     * @brief _get_base_pose returns the pose of a floating base in the world.
+     *
+     * Read from qpos (the state that mj_step integrates), so it reflects the latest step.
+     */
+    DQ _get_base_pose(const std::string& bodyname) const
+    {
+        const mjtNum* qpos = d_->qpos + m_->jnt_qposadr[_get_free_joint_handle(bodyname)];
+        // qpos of a free joint: position (x, y, z) followed by the quaternion (w, x, y, z)
+        DQ r = DQ(qpos[3], qpos[4], qpos[5], qpos[6]).normalize();
+        DQ p = qpos[0]*i_ + qpos[1]*j_ + qpos[2]*k_;
+        return r + 0.5*E_*p*r;
+    }
+
+    /**
+     * @brief _set_base_pose writes the pose of a floating base to qpos. The caller must run
+     *        mj_forward() to update the derived quantities (body and site poses, etc.).
+     */
+    void _set_base_pose(const std::string& bodyname, const DQ& pose)
+    {
+        mjtNum* qpos = d_->qpos + m_->jnt_qposadr[_get_free_joint_handle(bodyname)];
+        const VectorXd p = pose.translation().vec3();
+        const VectorXd r = pose.P().vec4();
+        std::copy(p.data(), p.data() + 3, qpos);
+        std::copy(r.data(), r.data() + 4, qpos + 3);
+    }
+
+    /**
+     * @brief _get_base_twist returns the twist of a floating base.
+     * @param reference_frame WORLD_FRAME: xi = w + E_*(p_dot + cross(p, w)), with w and p_dot in
+     *        the world frame (x_dot = 0.5*xi*x). BODY_FRAME: xi_body = w_body + E_*p_dot_body, the
+     *        angular velocity and the velocity of the body origin in the body frame
+     *        (x_dot = 0.5*x*xi_body), which equals Ad(conj(x), xi).
+     *
+     * The qvel of a free joint mixes frames: the first three values are the linear velocity of
+     * the body origin in the WORLD frame, and the last three are the angular velocity in the BODY
+     * frame.
+     */
+    DQ _get_base_twist(const std::string& bodyname, const REFERENCE_FRAME& reference_frame) const
+    {
+        const mjtNum* qvel = d_->qvel + m_->jnt_dofadr[_get_free_joint_handle(bodyname)];
+        const DQ x = _get_base_pose(bodyname);
+        const DQ r = x.P();
+        const DQ p_dot = qvel[0]*i_ + qvel[1]*j_ + qvel[2]*k_;   // world frame
+        const DQ w_body = qvel[3]*i_ + qvel[4]*j_ + qvel[5]*k_;  // body frame
+        if (reference_frame == REFERENCE_FRAME::BODY_FRAME)
+            return w_body + E_*(conj(r)*p_dot*r);
+        const DQ w = r*w_body*conj(r);
+        return w + E_*(p_dot + cross(x.translation(), w));
+    }
+
+    /**
+     * @brief _set_base_twist writes the twist of a floating base (see _get_base_twist()) to qvel.
+     *        The caller must run mj_forward().
+     */
+    void _set_base_twist(const std::string& bodyname, const DQ& twist, const REFERENCE_FRAME& reference_frame)
+    {
+        mjtNum* qvel = d_->qvel + m_->jnt_dofadr[_get_free_joint_handle(bodyname)];
+        const DQ x = _get_base_pose(bodyname);
+        const DQ r = x.P();
+        VectorXd p_dot, w_body;
+        if (reference_frame == REFERENCE_FRAME::BODY_FRAME)
+        {
+            p_dot = (r*twist.D()*conj(r)).vec3();  // body -> world
+            w_body = twist.P().vec3();
+        }
+        else
+        {
+            const DQ w = twist.P();
+            p_dot = (twist.D() - cross(x.translation(), w)).vec3();
+            w_body = (conj(r)*w*r).vec3();        // world -> body
+        }
+        std::copy(p_dot.data(), p_dot.data() + 3, qvel);
+        std::copy(w_body.data(), w_body.data() + 3, qvel + 3);
+    }
+
+    /**
+     * @brief _get_body_pose returns the pose of a body frame in the world.
+     *
+     * Read from d_->xpos and d_->xquat, which, like the site poses, are computed at the beginning
+     * of mj_step(). After a step they therefore correspond to the state before that step.
+     */
+    DQ _get_body_pose(const std::string& bodyname) const
+    {
+        const int body_id = _get_body_handle(bodyname);
+        const mjtNum* xpos = d_->xpos + 3 * body_id;
+        const mjtNum* xquat = d_->xquat + 4 * body_id;
+        DQ r = DQ(xquat[0], xquat[1], xquat[2], xquat[3]).normalize();
+        DQ p = xpos[0]*i_ + xpos[1]*j_ + xpos[2]*k_;
+        return r + 0.5*E_*p*r;
+    }
+
+    /**
+     * @brief _get_floating_base_names returns the names of the bodies that have a free joint.
+     *        Unnamed bodies are skipped, since they cannot be addressed by name.
+     */
+    std::vector<std::string> _get_floating_base_names() const
+    {
+        std::vector<std::string> names;
+        for (int j = 0; j < m_->njnt; j++)
+        {
+            if (m_->jnt_type[j] != mjJNT_FREE)
+                continue;
+            const char* bodyname = mj_id2name(m_, mjOBJ_BODY, m_->jnt_bodyid[j]);
+            if (bodyname)
+                names.push_back(bodyname);
+        }
+        return names;
+    }
+
 
 
     /**
@@ -623,12 +798,13 @@ public:
 
     /**
      * @brief Get names of all joints in the model
+     * @param only_single_dof If true, skip free and ball joints and unnamed joints
      * @return Vector of joint names
      *
      * Returns the names of all joints defined in the MuJoCo model.
      * The order of joint names corresponds to the joint indices in MuJoCo.
      */
-    std::vector<std::string> _get_joint_names() const
+    std::vector<std::string> _get_joint_names(const bool& only_single_dof) const
     {
         std::vector<std::string> names;
         names.reserve(m_->njnt);  // Pre-allocate memory for efficiency
@@ -637,6 +813,12 @@ public:
         {
             // MuJoCo stores joint names in the 'names' array with offsets
             const char* joint_name = m_->names + m_->name_jntadr[i];
+            if (only_single_dof)
+            {
+                const int joint_type = m_->jnt_type[i];
+                if (joint_type == mjJNT_FREE || joint_type == mjJNT_BALL || joint_name[0] == '\0')
+                    continue;
+            }
             names.push_back(std::string(joint_name));
         }
         return names;
@@ -763,7 +945,7 @@ public:
      */
     double   _get_joint_position(const std::string& jointname)
     {
-        int qpos_adr = m_->jnt_qposadr[_get_handle_from_map(jointname)];
+        int qpos_adr = m_->jnt_qposadr[_get_single_dof_joint_handle(jointname)];
         return d_->qpos[qpos_adr];
     }
 
@@ -778,7 +960,7 @@ public:
      */
     double _get_joint_velocity(const std::string& jointname)
     {
-        int qvel_adr = m_->jnt_dofadr[_get_handle_from_map(jointname)];
+        int qvel_adr = m_->jnt_dofadr[_get_single_dof_joint_handle(jointname)];
         return d_->qvel[qvel_adr];
     }
 
@@ -827,7 +1009,7 @@ public:
      */
     void _set_joint_position(const std::string& jointname, const double& angle_rad)
     {
-        int qpos_adr = m_->jnt_qposadr[_get_handle_from_map(jointname)];
+        int qpos_adr = m_->jnt_qposadr[_get_single_dof_joint_handle(jointname)];
         d_->qpos[qpos_adr] = angle_rad;
     }
 
@@ -943,7 +1125,7 @@ public:
      */
     double _get_joint_force(const std::string& jointname)
     {
-        int dof_adr = m_->jnt_dofadr[_get_handle_from_map(jointname)];
+        int dof_adr = m_->jnt_dofadr[_get_single_dof_joint_handle(jointname)];
         // qfrc_actuator (size nv) contains the forces generated by actuators, indexed by DoF
         return d_->qfrc_actuator[dof_adr];
     }
@@ -1491,7 +1673,10 @@ void DQ_MujocoInterface::remove_reference_frame(const std::string& name)
 
 /**
  * @brief Get names of all joints in the loaded model
- * @return Vector containing the names of all joints
+ * @param only_single_dof If true, return only the named hinge and slide joints, which are the
+ *        ones the joint methods (get_joint_positions(), etc.) accept. Use it with floating-base
+ *        robots, whose free joint (often unnamed) is accessed with get_base_pose() instead.
+ * @return Vector containing the names of the joints
  *
  * Returns the names of all joints defined in the MuJoCo XML model.
  * The order of joint names corresponds to the joint indices in MuJoCo.
@@ -1511,10 +1696,10 @@ void DQ_MujocoInterface::remove_reference_frame(const std::string& name)
  *       manually specifying them from the XML file.
  * @see get_number_of_joints() for getting just the count
  */
-std::vector<std::string> DQ_MujocoInterface::get_joint_names() const
+std::vector<std::string> DQ_MujocoInterface::get_joint_names(const bool& only_single_dof) const
 {
     _check_model();
-    return impl_->_get_joint_names();
+    return impl_->_get_joint_names(only_single_dof);
 }
 
 
@@ -1536,6 +1721,201 @@ std::vector<std::string> DQ_MujocoInterface::get_joint_names() const
 void DQ_MujocoInterface::reset_simulation() {
     _check_model();
     impl_->reset();
+}
+
+/**
+ * @brief Reset simulation to a keyframe defined in the XML model
+ * @param keyframe Name of the keyframe (<keyframe><key name="..."/></keyframe>)
+ *
+ * Like reset_simulation(), but the state (qpos, qvel, ctrl, time, etc.) is taken from the
+ * keyframe. Floating-base robots usually need it: their initial configuration (qpos0) often
+ * places the base inside the floor or the legs straight, and models such as the ones in MuJoCo
+ * Menagerie provide a standing keyframe (e.g., "home" or "stand"), whose ctrl also makes the
+ * position actuators hold that pose.
+ *
+ * @throws std::runtime_error If no model is loaded or the keyframe does not exist
+ */
+void DQ_MujocoInterface::reset_simulation(const std::string& keyframe)
+{
+    _check_model();
+    const int keyframe_id = mj_name2id(impl_->m_, mjOBJ_KEY, keyframe.c_str());
+    if (keyframe_id == -1)
+        throw std::runtime_error(error_msg_layout_ + "reset_simulation. The keyframe \"" + keyframe
+                                 + "\" does not exist in the XML model.");
+    impl_->reset(keyframe_id);
+}
+
+
+/**
+ * @brief Get the names of the floating bases in the model
+ * @return Names of the bodies that have a free joint (e.g., {"pelvis"} for a humanoid). Unnamed
+ *         bodies are skipped.
+ *
+ * Use these names with get_base_pose(), set_base_pose(), get_base_twist() and set_base_twist().
+ */
+std::vector<std::string> DQ_MujocoInterface::get_floating_base_names() const
+{
+    _check_model();
+    return impl_->_get_floating_base_names();
+}
+
+/**
+ * @brief Get the pose of a floating base
+ * @param bodyname Name of the body that owns the free joint (see get_floating_base_names()).
+ * @return Unit dual quaternion with the pose of the body frame in the world.
+ *
+ * Together with get_joint_positions() for the limbs, this is the full configuration of a
+ * floating-base robot. For instance, use it as the reference frame of the DQ_SerialManipulator
+ * of each leg.
+ *
+ * @note It is read from the state (qpos), so it reflects the latest simulation step.
+ * @throws std::runtime_error If the body does not exist or has no free joint
+ */
+DQ DQ_MujocoInterface::get_base_pose(const std::string& bodyname) const
+{
+    _check_model();
+    return impl_->_get_base_pose(bodyname);
+}
+
+/**
+ * @brief Teleport a floating base (no dynamics)
+ * @param bodyname Name of the body that owns the free joint.
+ * @param pose Unit dual quaternion with the desired pose of the body frame in the world.
+ *
+ * Like set_joint_positions(), this writes the state directly. The velocity of the base is kept;
+ * set it with set_base_twist() (e.g., to zero) if needed.
+ *
+ * @throws std::runtime_error If the body does not exist or has no free joint, or the pose is
+ *         not a unit dual quaternion
+ */
+void DQ_MujocoInterface::set_base_pose(const std::string& bodyname, const DQ& pose)
+{
+    if (!is_unit(pose))
+        throw std::runtime_error(error_msg_layout_ + "set_base_pose. The pose must be a unit dual quaternion!");
+    _check_model();
+    impl_->_set_base_pose(bodyname, pose);
+    // update body/site poses, etc. to match the new base pose
+    mj_forward(impl_->m_, impl_->d_);
+}
+
+/**
+ * @brief Get the twist of a floating base
+ * @param bodyname Name of the body that owns the free joint.
+ * @param reference_frame Frame in which the twist is expressed: WORLD_FRAME (default) or BODY_FRAME.
+ * @return Pure dual quaternion with the twist of the body.
+ *
+ * Let x = r + 0.5*E_*p*r be the pose returned by get_base_pose(), w the angular velocity of the
+ * body and p_dot the linear velocity of the body origin p.
+ *
+ * WORLD_FRAME: the twist is expressed in the world (inertial) frame, and its reference point is
+ * the world origin:
+ *
+ *     xi = w + E_*(p_dot + cross(p, w)),    x_dot = 0.5*xi*x,
+ *
+ *   - primary part, w: angular velocity of the body, in the world frame.
+ *   - dual part, p_dot + cross(p, w): linear velocity of the point of the body (extended as a
+ *     rigid body) that is at the world origin, in the world frame. It is NOT the velocity of the
+ *     body origin, p_dot, unless w = 0 or p = 0. Recover p_dot with
+ *         p_dot = xi.D() - cross(x.translation(), xi.P())
+ *
+ * BODY_FRAME: the twist is expressed in the body frame, and its reference point is the body
+ * origin:
+ *
+ *     xi_body = w_body + E_*p_dot_body = Ad(conj(x), xi),    x_dot = 0.5*x*xi_body,
+ *
+ *   - primary part, w_body = conj(r)*w*r: angular velocity of the body, in the body frame.
+ *   - dual part, p_dot_body = conj(r)*p_dot*r: linear velocity of the body origin, in the body frame.
+ *
+ * @note MuJoCo stores the velocity of a free joint (qvel) in a third, mixed form: the linear
+ *       velocity of the body origin in the world frame, followed by the angular velocity in the
+ *       body frame. This method converts it, so qvel never needs to be handled directly.
+ *
+ * @see set_base_twist()
+ * @throws std::runtime_error If the body does not exist or has no free joint
+ */
+DQ DQ_MujocoInterface::get_base_twist(const std::string& bodyname, const REFERENCE_FRAME& reference_frame) const
+{
+    _check_model();
+    return impl_->_get_base_twist(bodyname, reference_frame);
+}
+
+/**
+ * @brief Set the twist of a floating base (no dynamics)
+ * @param bodyname Name of the body that owns the free joint.
+ * @param twist Pure dual quaternion with the desired twist, expressed in reference_frame with the
+ *        same convention as get_base_twist().
+ * @param reference_frame Frame in which the twist is expressed: WORLD_FRAME (default) or BODY_FRAME.
+ *
+ * Build the twist from the velocities you want with
+ *
+ *     // WORLD_FRAME: w and p_dot (velocity of the body origin p) in the world frame
+ *     const DQ p = get_base_pose(bodyname).translation();
+ *     set_base_twist(bodyname, w + E_*(p_dot + cross(p, w)));
+ *
+ *     // BODY_FRAME: w_body and p_dot_body (velocity of the body origin) in the body frame
+ *     set_base_twist(bodyname, w_body + E_*p_dot_body, REFERENCE_FRAME::BODY_FRAME);
+ *
+ * In the world frame, the cross(p, w) term matters: xi = w alone (no dual part) rotates the body
+ * about the world origin, so its origin moves on a circle. To spin the body in place, use
+ * xi = w + E_*cross(p, w), or w_body alone in the body frame.
+ *
+ * Like set_base_pose(), it writes the state directly and bypasses the dynamics. The twist then
+ * evolves with the physics (gravity, contacts, ...) during the next steps.
+ *
+ * @see get_base_twist() and the twist_open_loop example
+ * @throws std::runtime_error If the body does not exist or has no free joint, or the twist is
+ *         not a pure dual quaternion
+ */
+void DQ_MujocoInterface::set_base_twist(const std::string& bodyname, const DQ& twist,
+                                        const REFERENCE_FRAME& reference_frame)
+{
+    if (!is_pure(twist))
+        throw std::runtime_error(error_msg_layout_ + "set_base_twist. The twist must be a pure dual quaternion!");
+    _check_model();
+    impl_->_set_base_twist(bodyname, twist, reference_frame);
+    // update velocity-dependent quantities
+    mj_forward(impl_->m_, impl_->d_);
+}
+
+/**
+ * @brief Get the pose of a body frame
+ * @param bodyname Name of the body (e.g., a foot, the trunk or a hand).
+ * @return Unit dual quaternion with the pose of the body frame in the world.
+ *
+ * @note Like get_site_pose(), it is computed at the beginning of each simulation step, so after
+ *       trigger_next_simulation_step() it corresponds to the state before that step.
+ * @throws std::runtime_error If the body does not exist
+ */
+DQ DQ_MujocoInterface::get_body_pose(const std::string& bodyname) const
+{
+    _check_model();
+    return impl_->_get_body_pose(bodyname);
+}
+
+/**
+ * @brief Make the viewer camera follow a body
+ * @param bodyname Name of the body to follow (e.g., the floating base). An empty name releases
+ *        the camera, which then stays where it is.
+ *
+ * The camera looks at the center of mass of the body and its children, so a walking robot stays
+ * in view. The mouse still rotates and zooms the camera. It does nothing in HEADLESS mode, and it
+ * is cleared by load_model().
+ *
+ * @throws std::runtime_error If the body does not exist
+ */
+void DQ_MujocoInterface::set_camera_tracking(const std::string& bodyname)
+{
+    _check_model();
+    mjvCamera& cam = impl_->cam_;
+    if (bodyname.empty())
+    {
+        cam.type = mjCAMERA_FREE;
+        cam.trackbodyid = -1;
+        return;
+    }
+    cam.trackbodyid = impl_->_get_body_handle(bodyname);
+    cam.type = mjCAMERA_TRACKING;
+    cam.fixedcamid = -1;
 }
 
 } // namespace DQ_robotics_extensions
