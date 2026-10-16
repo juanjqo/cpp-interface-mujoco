@@ -280,16 +280,7 @@ twist in every step, as in the [`twist_open_loop`](examples/twist_open_loop.cpp)
 #### Reference frame of the twist
 
 `get_base_twist` and `set_base_twist` take an optional `DQ_MujocoInterface::REFERENCE_FRAME` that sets the frame of
-the twist. Let `x = r + 0.5*E_*p*r` be the pose of the body, `w` its angular velocity and `p_dot` the linear velocity of
-its origin `p`:
-
-| `reference_frame` | Twist | Primary part | Dual part | Kinematics |
-|---|---|---|---|---|
-| `WORLD_FRAME` (default) | `xi = w + E_*(p_dot + cross(p, w))` | Angular velocity, in the world frame | Linear velocity of the point of the body (extended as a rigid body) that is at the **world origin**, in the world frame | `x_dot = 0.5*xi*x` |
-| `BODY_FRAME` | `xi_body = Ad(conj(x), xi)` | Angular velocity, in the body frame | Linear velocity of the **body origin**, in the body frame | `x_dot = 0.5*x*xi_body` |
-
-In the world frame the dual part is **not** the velocity `p_dot` of the body origin, unless `w = 0` or `p = 0`.
-Converting between velocities and twists:
+the twist. 
 
 ```cpp
 using RF = DQ_MujocoInterface::REFERENCE_FRAME;
@@ -309,10 +300,6 @@ const DQ xi_body = mi.get_base_twist("box", RF::BODY_FRAME);             // equa
 const DQ w_body_measured = xi_body.P();
 const DQ p_dot_body_measured = xi_body.D();
 ```
-
-In the world frame, the `cross(p, w)` term matters: `set_base_twist("box", w)` rotates the box about the world
-origin, so its origin moves on a circle. To spin it in place, use `w + E_*cross(p, w)`, or `w_body` alone in
-`BODY_FRAME`.
 
 MuJoCo stores the velocity of a free joint (`qvel`) in a third, mixed form: the linear velocity of the body origin in
 the world frame, followed by the angular velocity in the body frame. The interface converts it, so you never need to
