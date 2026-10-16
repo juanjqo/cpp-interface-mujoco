@@ -1315,6 +1315,34 @@ public:
     }
 
     /**
+     * @brief _set_body_pose moves a kinematic body (a mocap body): its pose is part of the state
+     *        (mocap_pos and mocap_quat). The kinematics is updated, so that the body and site poses
+     *        reflect the change at once. The caller must hold physics_mutex_.
+     * @throws std::invalid_argument If the body is not a mocap body
+     */
+    void _set_body_pose(const std::string& bodyname, const DQ& pose)
+    {
+        const int body_id = _get_body_handle(bodyname);
+        const int mocap_id = m_->body_mocapid[body_id];
+        if (mocap_id < 0)
+        {
+            const bool is_free = m_->body_jntnum[body_id] == 1
+                                 && m_->jnt_type[m_->body_jntadr[body_id]] == mjJNT_FREE;
+            if (is_free)
+                throw std::invalid_argument("The body \"" + bodyname + "\" is a FREE body (a floating base): "
+                                            "move it with set_base_pose().");
+            throw std::invalid_argument("The body \"" + bodyname + "\" is not KINEMATIC, so it cannot be moved. "
+                                        "Add it with DQ_MujocoSceneBuilder::BODY::KINEMATIC (or mocap=\"true\" "
+                                        "in the XML).");
+        }
+        const VectorXd p = pose.translation().vec3();
+        const VectorXd r = pose.P().vec4();
+        std::copy(p.data(), p.data() + 3, d_->mocap_pos + 3 * mocap_id);
+        std::copy(r.data(), r.data() + 4, d_->mocap_quat + 4 * mocap_id);
+        mj_kinematics(m_, d_);
+    }
+
+    /**
      * @brief _get_floating_base_names returns the names of the bodies that have a free joint.
      *        Unnamed bodies are skipped, since they cannot be addressed by name.
      */
@@ -2563,6 +2591,32 @@ DQ DQ_MujocoInterface::get_body_pose(const std::string& bodyname) const
 {
     _check_model();
     return impl_->read_state([&](const mjData* d) { return impl_->_get_body_pose(d, bodyname); });
+}
+
+/**
+ * @brief Move a kinematic body
+ * @param bodyname Name of a KINEMATIC body (DQ_MujocoSceneBuilder::BODY::KINEMATIC, or a body with
+ *        mocap="true" in the XML).
+ * @param pose Unit dual quaternion with the desired pose of the body frame in the world.
+ *
+ * Kinematic bodies are moved by the program, not by the physics: gravity and contacts do not move
+ * them, but they collide with and push FREE objects and robots. Call it as often as needed, e.g.,
+ * in every iteration of the control loop to follow a trajectory; it is cheap (it only updates the
+ * kinematics). Like the other teleports, it takes effect at once, also while the simulation runs
+ * in real time. reset_simulation() puts the body back at its initial pose.
+ *
+ * @note MuJoCo treats the moved body as having zero velocity in the contacts, so an object resting
+ *       on a moving kinematic platform slides instead of being carried by friction.
+ * @throws std::runtime_error If the body does not exist, or the pose is not a unit dual quaternion
+ * @throws std::invalid_argument If the body is not kinematic (FIXED bodies never move; FREE bodies
+ *         are moved with set_base_pose())
+ */
+void DQ_MujocoInterface::set_body_pose(const std::string& bodyname, const DQ& pose)
+{
+    if (!is_unit(pose))
+        throw std::runtime_error(error_msg_layout_ + "set_body_pose. The pose must be a unit dual quaternion!");
+    _check_model();
+    impl_->modify_state([&]() { impl_->_set_body_pose(bodyname, pose); });
 }
 
 /**

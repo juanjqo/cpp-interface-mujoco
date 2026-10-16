@@ -151,6 +151,8 @@ void DQ_MujocoSceneBuilder::Impl::add_primitive(const std::string& name, const D
     set_pose(b->pos, b->quat, pose, function_name);
     if (body == BODY::FREE)
         mjs_addFreeJoint(b);  // unnamed: the object is addressed by its body name
+    if (body == BODY::KINEMATIC)
+        b->mocap = 1;  // its pose is part of the state (mjData::mocap_pos/mocap_quat)
 
     mjsGeom* geom = mjs_addGeom(b, nullptr);
     mjs_setName(geom->element, name.c_str());
@@ -580,8 +582,9 @@ void DQ_MujocoSceneBuilder::add_light(const std::string& name, const DQ& positio
  * @param name Name of the object (its body and its geometry).
  * @param pose Pose of the center of the box in the world.
  * @param half_sizes Half of the size of the box along its x, y and z axes, in meters.
- * @param body FIXED (welded to the world, the default) or FREE (a floating base that falls,
- *        collides and can be pushed).
+ * @param body FIXED (welded to the world, the default), KINEMATIC (moved by the program with
+ *        DQ_MujocoInterface::set_body_pose()) or FREE (a floating base that falls, collides and
+ *        can be pushed).
  * @param rgba Color, with each component between 0 and 1.
  * @param mass Mass in kg (only used by FREE objects).
  */

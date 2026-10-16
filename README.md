@@ -145,7 +145,7 @@ cd ~/git/cpp-interface-mujoco/build/examples
 | [`site_poses`](examples/site_poses.cpp) | Moves a free-standing `target` frame with `set_site_pose` and reads the `end_effector` frame with `get_site_pose` |
 | [`reference_frames`](examples/reference_frames.cpp) | Draws desired, measured and fixed reference frames, plus a trail of past poses created and removed on the fly |
 | [`floating_base`](examples/floating_base.cpp) | A quadruped starts from its `home` keyframe, rocks its trunk with the leg actuators and gets pushed with `set_base_twist`; the camera follows it |
-| [`scene_builder`](examples/scene_builder.cpp) | Builds a scene in code (a table, two quadrupeds and an arm) and edits it while it runs in real time: a ball is dropped every 2 s and the oldest is removed; the arm's kinematics, moved to where it was placed, are drawn on its end effector |
+| [`scene_builder`](examples/scene_builder.cpp) | Builds a scene in code (a table, two quadrupeds, an arm and a kinematic block moved with `set_body_pose`) and edits it while it runs in real time: a ball is dropped every 2 s and the oldest is removed; the arm's kinematics, moved to where it was placed, are drawn on its end effector |
 | [`twist_open_loop`](examples/twist_open_loop.cpp) | Stepped simulation paced by a sas `Clock`: commands a floating box with constant twists (no feedback) in `WORLD_FRAME` and `BODY_FRAME`, before every step: rise, orbit the world z axis, spin in place, drive in a circle, descend |
 
 The first three examples use `GenericManipulatorRobot`, a generic 6-DoF arm, `floating_base` uses
@@ -407,6 +407,7 @@ scene.add_floor();
 scene.add_light("sun", 3*k_, -1.0*k_, true);                   // position, direction, directional
 scene.add_box("table", x_table, {0.25, 0.25, 0.2});            // FIXED: welded to the world
 scene.add_sphere("ball", x_ball, 0.04, BODY::FREE, {1, 0, 0, 1}, 0.1);  // FREE: a floating base
+scene.add_box("pusher", x_pusher, {0.05, 0.05, 0.05}, BODY::KINEMATIC);  // moved by the program
 scene.add_site("target", x_target);                            // movable with set_site_pose()
 
 auto arm = scene.add_robot(GenericManipulatorRobot::description(), "arm_", x_arm);
@@ -422,8 +423,17 @@ mi.reset_simulation("home");   // every robot at its home configuration, where i
   sky of its model are not, nor its unused materials and textures, and the physics options are those of the scene.
 - **The "home" keyframe** of the scene has each robot at its own home keyframe, moved to where it was placed (MuJoCo
   does not move the keyframes of attached floating-base robots), and every other element at its initial pose.
-- **Free objects** (`BODY::FREE`) fall, collide and can be pushed; they are floating bases, so `get_base_pose`,
-  `set_base_twist`, etc. work with their names. `BODY::FIXED` objects are welded to the world.
+- **How objects move:**
+
+  | `BODY` | Moved by | Use |
+  |---|---|---|
+  | `FIXED` (default) | Nothing: welded to the world | Tables, walls |
+  | `KINEMATIC` | Your program, with `mi.set_body_pose(name, x)` (about 2 µs, also while running) | Moving obstacles, platforms, targets that collide |
+  | `FREE` | The physics: it falls, collides and can be pushed | Objects to push, grasp or throw (floating bases: `get_base_pose`, `set_base_twist`, ...) |
+
+  Kinematic objects are MuJoCo mocap bodies: gravity and contacts do not move them, but they push `FREE` objects and
+  robots. MuJoCo treats them as having zero velocity in the contacts, so an object resting on a moving kinematic
+  platform slides instead of being carried by friction.
 - **Kinematics** of a placed robot: move its reference frame to where it was placed,
   `kinematics.set_reference_frame(x_arm*kinematics.get_reference_frame())`.
 - **Not yet supported:** robots with asset files (meshes, textures), e.g., MuJoCo Menagerie models.
@@ -513,7 +523,7 @@ but not drawn.
 | `set_joint_positions(names, q)` | Teleport joints (no dynamics) |
 | `set_joint_target_positions/velocities/forces(names, u)` | Actuator commands |
 | `get_site_pose(name)` / `set_site_pose(name, x)` | Site pose as a unit dual quaternion |
-| `get_body_pose(name)` | Body pose as a unit dual quaternion |
+| `get_body_pose(name)` / `set_body_pose(name, x)` | Body pose as a unit dual quaternion / move a `KINEMATIC` body (a MuJoCo mocap body) |
 | `get_floating_base_names()` | Bodies with a free joint |
 | `get_base_pose(body)` / `set_base_pose(body, x)` | Floating-base pose as a unit dual quaternion (set: teleport) |
 | `get_base_twist(body, frame)` / `set_base_twist(body, xi, frame)` | Floating-base twist in `WORLD_FRAME` (default, reference point at the world origin) or `BODY_FRAME` (reference point at the body origin) (set: teleport) |
@@ -530,7 +540,7 @@ but not drawn.
 | `set_timestep(dt)` / `set_integrator(integrator)` / `set_gravity(g)` | Physics options of the scene |
 | `add_floor(name)` | An infinite checkered floor at z = 0 |
 | `add_light(name, position, direction, directional)` | A spot or directional light |
-| `add_box/sphere/cylinder/capsule(name, x, sizes..., body, rgba, mass)` | A primitive object, `FIXED` or `FREE` |
+| `add_box/sphere/cylinder/capsule(name, x, sizes..., body, rgba, mass)` | A primitive object, `FIXED`, `KINEMATIC` or `FREE` |
 | `add_site(name, x, size, rgba)` | A site in the world (a frame without physics) |
 | `add_robot(robot, prefix, x)` | A robot (e.g., of the robots library), placed at `x`; returns its description in the scene |
 | `remove(name)` | Remove an object, site, light, the floor, or a robot (by its prefixed root body) |

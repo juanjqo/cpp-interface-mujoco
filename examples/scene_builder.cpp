@@ -11,9 +11,11 @@ It uses DQ Robotics (https://dqrobotics.github.io) but is not part of DQ Robotic
 Scene builder example.
 
 Builds a scene in code with DQ_MujocoSceneBuilder: a floor, a light, a table, two quadrupeds and an
-arm of the robots library, placed with unit dual quaternions. Then it runs it in real time and
-edits it while it runs, with edit_scene(): every 2 s a ball is dropped on the table, and the oldest
-ball is removed when there are more than 5. The example also shows how to:
+arm of the robots library, placed with unit dual quaternions, and a KINEMATIC block, moved by the
+program with set_body_pose(): it slides on the floor and pushes what is in its way. Then it runs
+the scene in real time and edits it while it runs, with edit_scene(): every 2 s a ball is dropped
+on the table, and the oldest ball is removed when there are more than 5. The example also shows
+how to:
   - use the names of the placed robots (prefixed: "arm_joint1", "dog1_trunk", ...)
   - start every robot at its home configuration, where it was placed (the "home" keyframe)
   - use the kinematics of the arm where it was placed: its forward kinematics is drawn as a
@@ -67,6 +69,7 @@ int main()
     scene.add_floor();
     scene.add_light("sun", 3*k_, DQ(0, 0.3, 0.2, -1), true);
     scene.add_box("table", translation(0.6, 0, 0.2), {0.25, 0.25, 0.2}, BODY::FIXED, {0.55, 0.4, 0.3, 1});
+    scene.add_box("slider", translation(0, -0.4, 0.05), {0.05, 0.05, 0.05}, BODY::KINEMATIC, {0.2, 0.7, 0.3, 1});
 
     const DQ x_arm = translation(0, 0, 0);
     const DQ r_dog = cos(M_PI/4) + k_*sin(M_PI/4);  // the quadrupeds face +y
@@ -114,6 +117,9 @@ int main()
                      rear_hip,  -2.0*rear_hip,   rear_hip,  -2.0*rear_hip;
             mi.set_joint_target_positions(dog.joint_names, q_ref);
         }
+
+        // The kinematic block slides along x, between the table and the quadrupeds
+        mi.set_body_pose("slider", translation(0.9*sin(0.4*t), -0.4, 0.05));
 
         // The forward kinematics of the arm, drawn on top of its end effector
         mi.set_reference_frame_pose("fkm", arm_kinematics.fkm(mi.get_joint_positions(arm.joint_names)));

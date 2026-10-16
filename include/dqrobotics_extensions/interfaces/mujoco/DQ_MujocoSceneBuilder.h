@@ -45,14 +45,19 @@ class DQ_MujocoSceneBuilder
 {
 public:
     /**
-     * @brief How an object is attached to the world.
-     *  FIXED: welded to the world; it does not move.
-     *  FREE:  has a free joint, so it falls, collides and can be pushed. It is a floating base:
-     *         use get_base_pose(), set_base_twist(), etc. with its name.
+     * @brief How an object moves.
+     *  FIXED:     welded to the world; it never moves.
+     *  KINEMATIC: moved by the program, not by the physics: DQ_MujocoInterface::set_body_pose()
+     *             sets its pose (also while the simulation runs). Gravity and contacts do not move
+     *             it, but it collides with and pushes FREE objects and robots (a MuJoCo mocap body).
+     *             E.g., a moving obstacle, a platform or a target that collides.
+     *  FREE:      has a free joint, so it falls, collides and can be pushed. It is a floating base:
+     *             use get_base_pose(), set_base_twist(), etc. with its name.
      */
     enum class BODY
     {
         FIXED,
+        KINEMATIC,
         FREE
     };
 

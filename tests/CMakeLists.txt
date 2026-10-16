@@ -53,6 +53,8 @@ set(TESTS
     edit_scene_while_running
     edit_scene_of_a_model_file
     edit_scene_with_window
+    kinematic_body
+    kinematic_body_while_running
     real_time_simulation
     commands_and_teleports_while_running
     viewer_draws_in_both_modes

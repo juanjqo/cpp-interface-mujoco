@@ -120,6 +120,8 @@ public:
                                    const REFERENCE_FRAME& reference_frame = REFERENCE_FRAME::WORLD_FRAME);
 
     DQ_robotics::DQ get_body_pose(const std::string& bodyname) const;
+    // Moves a KINEMATIC body (a MuJoCo mocap body), also while the simulation runs
+    void            set_body_pose(const std::string& bodyname, const DQ_robotics::DQ& pose);
 
     DQ_robotics::DQ get_site_pose(const std::string& objectname) const;
     void set_site_pose(const std::string& objectname, const DQ_robotics::DQ& pose);

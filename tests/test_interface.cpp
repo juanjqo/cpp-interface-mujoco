@@ -1034,6 +1034,100 @@ static void edit_scene_with_window()
     CHECK(glfw_errors == 0);
 }
 
+static DQ_MujocoModel platform_scene()
+{
+    // A kinematic platform at height 0.5, a ball above it, and a fixed wall
+    DQ_MujocoSceneBuilder builder;
+    builder.add_floor();
+    builder.add_box("platform", 1 + 0.5*E_*(0.5*k_), {0.2, 0.2, 0.02}, BODY::KINEMATIC);
+    builder.add_sphere("ball", 1 + 0.5*E_*(0.8*k_), 0.05, BODY::FREE, {1, 0, 0, 1}, 0.1);
+    builder.add_box("wall", 1 + 0.5*E_*(1.0*i_ + 0.5*k_), {0.02, 0.3, 0.5});
+    return builder.build();
+}
+
+static void kinematic_body()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(platform_scene());
+    const DQ x0 = 1 + 0.5*E_*(0.5*k_);
+
+    // Gravity and contacts do not move the platform; the ball comes to rest on it
+    for (int i = 0; i < 500; i++)
+        mi.trigger_next_simulation_step();
+    CHECK_NEAR(pose_error(mi.get_body_pose("platform"), x0), 0.0);
+    CHECK(std::abs(mi.get_base_pose("ball").translation().q(3) - 0.57) < 0.005);  // 0.5 + 0.02 + 0.05
+
+    // Raising the platform (1 mm per step) lifts the ball
+    for (int i = 1; i <= 100; i++)
+    {
+        mi.set_body_pose("platform", 1 + 0.5*E_*((0.5 + 0.001*i)*k_));
+        mi.trigger_next_simulation_step();
+    }
+    for (int i = 0; i < 100; i++)
+        mi.trigger_next_simulation_step();
+    CHECK_NEAR(pose_error(mi.get_body_pose("platform"), 1 + 0.5*E_*(0.6*k_)), 0.0);
+    CHECK(std::abs(mi.get_base_pose("ball").translation().q(3) - 0.67) < 0.005);
+
+    // The new pose is visible at once, also a rotation
+    const DQ x = test_pose();
+    mi.set_body_pose("platform", x);
+    CHECK_NEAR(pose_error(mi.get_body_pose("platform"), x), 0.0);
+
+    // Only kinematic bodies can be moved
+    CHECK_THROWS(std::invalid_argument, mi.set_body_pose("wall", x));
+    try
+    {
+        mi.set_body_pose("ball", x);
+        throw std::runtime_error("set_body_pose did not throw for a FREE body");
+    }
+    catch (const std::invalid_argument& e)
+    {
+        CHECK(std::string(e.what()).find("set_base_pose") != std::string::npos);
+    }
+    CHECK_THROWS(std::runtime_error, mi.set_body_pose("unknown", x));
+    CHECK_THROWS(std::runtime_error, mi.set_body_pose("platform", 2.0*x));  // not unit
+
+    // A moved kinematic body keeps its pose through an edit, and new kinematic bodies start at
+    // their pose
+    mi.edit_scene([](DQ_MujocoSceneBuilder& scene) {
+        scene.add_box("lift", 1 + 0.5*E_*(-1.0*i_ + 0.3*k_), {0.1, 0.1, 0.1}, BODY::KINEMATIC);
+    });
+    CHECK_NEAR(pose_error(mi.get_body_pose("platform"), x), 0.0);
+    CHECK_NEAR(pose_error(mi.get_body_pose("lift"), 1 + 0.5*E_*(-1.0*i_ + 0.3*k_)), 0.0);
+    mi.set_body_pose("lift", 1 + 0.5*E_*(-1.0*i_ + 0.6*k_));
+    CHECK_NEAR(pose_error(mi.get_body_pose("lift"), 1 + 0.5*E_*(-1.0*i_ + 0.6*k_)), 0.0);
+
+    // Resets put the kinematic bodies back at their initial poses
+    mi.reset_simulation();
+    CHECK_NEAR(pose_error(mi.get_body_pose("platform"), x0), 0.0);
+    mi.set_body_pose("platform", x);
+    mi.reset_simulation("home");
+    CHECK_NEAR(pose_error(mi.get_body_pose("platform"), x0), 0.0);
+}
+
+static void kinematic_body_while_running()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(platform_scene());
+    mi.start_simulation();
+
+    // A 500 Hz loop moves the platform along a circle, carrying the ball resting on it (slowly,
+    // since the ball is only pushed by the platform's motion)
+    const auto start = std::chrono::steady_clock::now();
+    DQ x;
+    while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(800))
+    {
+        const double t = mi.get_simulation_time();
+        x = 1 + 0.5*E_*(0.05*sin(t)*i_ + 0.05*(1 - cos(t))*j_ + 0.5*k_);
+        mi.set_body_pose("platform", x);
+        CHECK_NEAR(pose_error(mi.get_body_pose("platform"), x), 0.0);  // at once
+        sleep_for(0.002);
+    }
+    CHECK(std::abs(mi.get_real_time_factor() - 1.0) < 0.05);
+    CHECK(mi.get_base_pose("ball").translation().q(3) > 0.5);  // still on the platform
+    mi.stop_simulation();
+}
+
 static void camera_tracking()
 {
     // Windowed, so that the tracking camera is actually used by the renderer
@@ -1199,6 +1293,8 @@ int main(int argc, char** argv)
         {"edit_scene_while_running", edit_scene_while_running},
         {"edit_scene_of_a_model_file", edit_scene_of_a_model_file},
         {"edit_scene_with_window", edit_scene_with_window},
+        {"kinematic_body", kinematic_body},
+        {"kinematic_body_while_running", kinematic_body_while_running},
         {"real_time_simulation", real_time_simulation},
         {"commands_and_teleports_while_running", commands_and_teleports_while_running},
         {"viewer_draws_in_both_modes", viewer_draws_in_both_modes},
