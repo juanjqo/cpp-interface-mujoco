@@ -1,4 +1,13 @@
 /**
+SPDX-License-Identifier: LGPL-3.0-or-later
+Copyright (C) 2025-2026 Juan Jose Quiroz Omana
+
+This file is part of cpp-interface-mujoco, an unofficial interface for C++17 between DQ Robotics
+and MuJoCo: https://github.com/juanjqo/cpp-interface-mujoco
+It uses DQ Robotics (https://dqrobotics.github.io) but is not part of DQ Robotics.
+*/
+
+/**
 Tests for DQ_MujocoInterface.
 
 Each test is a function registered in tests_. Run all of them with
@@ -13,10 +22,13 @@ display; on a headless machine, use xvfb-run.
 */
 
 #include "dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h"
+#include "dqrobotics_extensions/interfaces/mujoco/robots/GenericQuadrupedRobot.h"
 #include <GLFW/glfw3.h>
 #include <cmath>
+#include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <map>
 
 using namespace DQ_robotics;
@@ -496,6 +508,133 @@ static void reset_to_keyframe()
     CHECK_THROWS(std::runtime_error, mi.reset_simulation("unknown"));
 }
 
+static std::vector<unsigned char> bytes(const std::string& text)
+{
+    return std::vector<unsigned char>(text.begin(), text.end());
+}
+
+static DQ_MujocoModel in_memory_model()
+{
+    // An <include> file and a mesh under meshdir: both must be found in memory. The tests run in
+    // tests/models, where neither "parts/" nor "meshes/" exist, so nothing can come from disk.
+    DQ_MujocoModel model;
+    model.name = "in_memory.xml";
+    model.xml = R"(<mujoco model="in memory">
+                     <compiler meshdir="meshes"/>
+                     <asset><mesh name="tetra" file="tetra.obj"/></asset>
+                     <worldbody><include file="parts/arm.xml"/></worldbody>
+                   </mujoco>)";
+    model.assets["parts/arm.xml"] = bytes(R"(<mujoco>
+                                               <body name="arm">
+                                                 <joint name="included_hinge" axis="0 0 1"/>
+                                                 <geom type="mesh" mesh="tetra"/>
+                                               </body>
+                                             </mujoco>)");
+    model.assets["meshes/tetra.obj"] = bytes("v 0 0 0\nv 0.1 0 0\nv 0 0.1 0\nv 0 0 0.1\n"
+                                             "f 1 3 2\nf 1 2 4\nf 1 4 3\nf 2 3 4\n");
+    return model;
+}
+
+static void load_model_from_memory()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(in_memory_model());
+    CHECK(mi.get_joint_names() == std::vector<std::string>{"included_hinge"});
+    mi.set_joint_positions({"included_hinge"}, vec({0.4}));
+    mi.trigger_next_simulation_step();
+
+    // Switching between a model in memory and a file works both ways
+    mi.load_model("pendulum.xml");
+    CHECK(mi.get_joint_names() == std::vector<std::string>{"pendulum_joint"});
+    mi.load_model(in_memory_model());
+    CHECK(mi.get_joint_names() == std::vector<std::string>{"included_hinge"});
+}
+
+static void load_model_from_memory_errors()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+
+    DQ_MujocoModel no_name = in_memory_model();
+    no_name.name = "";
+    CHECK_THROWS(std::invalid_argument, mi.load_model(no_name));
+
+    DQ_MujocoModel no_xml = in_memory_model();
+    no_xml.xml = "";
+    CHECK_THROWS(std::invalid_argument, mi.load_model(no_xml));
+
+    DQ_MujocoModel clash = in_memory_model();
+    clash.assets[clash.name] = bytes("<mujoco/>");
+    CHECK_THROWS(std::invalid_argument, mi.load_model(clash));
+
+    // A missing asset is reported with MuJoCo's message, which names the file
+    DQ_MujocoModel missing_mesh = in_memory_model();
+    missing_mesh.assets.erase("meshes/tetra.obj");
+    try
+    {
+        mi.load_model(missing_mesh);
+        throw std::runtime_error("load_model did not throw for a missing asset");
+    }
+    catch (const std::runtime_error& e)
+    {
+        CHECK(std::string(e.what()).find("tetra.obj") != std::string::npos);
+    }
+
+    // A failed load keeps the interface usable
+    mi.load_model(in_memory_model());
+    CHECK(mi.get_joint_names() == std::vector<std::string>{"included_hinge"});
+}
+
+// Generated from tests/models/embedded by dq_mujoco_embed_model (see tests/CMakeLists.txt)
+namespace DQ_robotics_extensions::embedded_models
+{
+DQ_MujocoModel embedded_test_scene();
+}
+
+static void embedded_model_with_assets()
+{
+    const DQ_MujocoModel model = embedded_models::embedded_test_scene();
+    CHECK(model.name == "scene.xml");
+    CHECK(model.assets.size() == 3);
+
+    // Binary files are embedded byte for byte (the blob has every byte value, including 0)
+    std::ifstream file("embedded/data/blob.bin", std::ios::binary);
+    CHECK(file.good());
+    const std::vector<unsigned char> blob((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    CHECK(blob.size() == 512);
+    CHECK(model.assets.at("data/blob.bin") == blob);
+
+    // The include file and the mesh are found in memory
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(model);
+    CHECK(mi.get_joint_names() == std::vector<std::string>{"included_hinge"});
+}
+
+static void generic_quadruped_description()
+{
+    const DQ_MujocoRobotDescription robot = GenericQuadrupedRobot::description();
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(robot.model);
+    mi.reset_simulation(robot.home_keyframe);
+
+    // The names in the description match the model
+    CHECK(mi.get_floating_base_names() == std::vector<std::string>{robot.floating_base});
+    CHECK(mi.get_joint_names(true) == robot.joint_names);
+    for (const auto& site : robot.end_effector_sites)
+        mi.get_site_pose(site);  // throws if the site does not exist
+
+    // The keyframe stands the robot: after 2 s the trunk is still up and level
+    for (int i = 0; i < 1000; i++)
+        mi.trigger_next_simulation_step();
+    const DQ x_base = mi.get_base_pose(robot.floating_base);
+    const double height = x_base.translation().q(3);
+    CHECK(height > 0.2 && height < 0.3);
+    const DQ z_axis = x_base.P()*k_*conj(x_base.P());
+    CHECK(z_axis.q(3) > 0.99);
+    // ...on its four feet
+    for (const auto& site : robot.end_effector_sites)
+        CHECK(std::abs(mi.get_site_pose(site).translation().q(3)) < 0.03);
+}
+
 static void camera_tracking()
 {
     // Windowed, so that the tracking camera is actually used by the renderer
@@ -550,6 +689,10 @@ int main(int argc, char** argv)
         {"joint_and_floating_base_names", joint_and_floating_base_names},
         {"reset_to_keyframe", reset_to_keyframe},
         {"camera_tracking", camera_tracking},
+        {"load_model_from_memory", load_model_from_memory},
+        {"load_model_from_memory_errors", load_model_from_memory_errors},
+        {"embedded_model_with_assets", embedded_model_with_assets},
+        {"generic_quadruped_description", generic_quadruped_description},
     };
 
     std::vector<std::string> selected;

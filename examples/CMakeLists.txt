@@ -9,12 +9,23 @@ set(EXAMPLES
     joint_control
     site_poses
     reference_frames
-    floating_base
     twist_open_loop
 )
+# Examples that use the robots library (DQ_MUJOCO_BUILD_ROBOTS=ON)
+set(ROBOT_EXAMPLES
+    floating_base
+)
+if(DQ_MUJOCO_BUILD_ROBOTS)
+    list(APPEND EXAMPLES ${ROBOT_EXAMPLES})
+endif()
+
 foreach(example IN LISTS EXAMPLES)
     add_executable(${example} ${example}.cpp)
-    target_link_libraries(${example} PRIVATE dqrobotics_extensions::interface-mujoco)
+    if(example IN_LIST ROBOT_EXAMPLES)
+        target_link_libraries(${example} PRIVATE dqrobotics_extensions::interface-mujoco-robots)
+    else()
+        target_link_libraries(${example} PRIVATE dqrobotics_extensions::interface-mujoco)
+    endif()
     # Building a single example (e.g., from an IDE) must also copy the models
     add_dependencies(${example} copy_example_models)
 endforeach()

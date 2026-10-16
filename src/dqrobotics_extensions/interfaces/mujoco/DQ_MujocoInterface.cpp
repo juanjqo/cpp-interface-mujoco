@@ -1,27 +1,13 @@
 /**
-(C) Copyright 2011-2025 DQ Robotics Developers
+SPDX-License-Identifier: LGPL-3.0-or-later
+Copyright (C) 2025-2026 Juan Jose Quiroz Omana
 
-This file is based on DQ Robotics.
+This file is part of cpp-interface-mujoco, an unofficial interface for C++17 between DQ Robotics
+and MuJoCo: https://github.com/juanjqo/cpp-interface-mujoco
+It uses DQ Robotics (https://dqrobotics.github.io) but is not part of DQ Robotics.
 
-    DQ Robotics is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Lesser General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    DQ Robotics is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Lesser General Public License for more details.
-
-    You should have received a copy of the GNU Lesser General Public License
-    along with DQ Robotics.  If not, see <http://www.gnu.org/licenses/>.
-
-DQ Robotics website: dqrobotics.github.io
-
-Contributors:
-- Juan Jose Quiroz Omana
-       - Responsible for the original implementation.
-
+The mouse and scroll callbacks are adapted from MuJoCo's sample/basic.cc,
+Copyright 2021 DeepMind Technologies Limited, licensed under the Apache License, Version 2.0.
 */
 
 #include <chrono>
@@ -30,6 +16,7 @@ Contributors:
 #include <mutex>
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <map>
 //#include <thread>
 #include "mujoco/mujoco.h"
@@ -51,6 +38,9 @@ using namespace Eigen;
 class DQ_MujocoInterface::Impl
 {
 public:
+    // The mouse and scroll handling below is adapted from MuJoCo's sample/basic.cc (Apache License 2.0,
+    // see the notice at the top of this file).
+
     // Static callback wrappers
     static void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
         Impl* self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
@@ -268,7 +258,60 @@ public:
         mjModel* m = mj_loadXML(xml_model.c_str(), NULL, error, sizeof(error));
         if (!m)
             throw std::runtime_error("Failed to load the xml model \"" + xml_model + "\": " + error);
+        _set_model(m, xml_model);
+    }
 
+    /**
+     * @brief load_model loads a model held in memory. The XML and its assets are added to a
+     *        MuJoCo virtual file system, so no file is read from disk.
+     */
+    void load_model(const DQ_MujocoModel& model)
+    {
+        if (model.name.empty())
+            throw std::invalid_argument("The name of the model cannot be empty");
+        if (model.xml.empty())
+            throw std::invalid_argument("The xml of the model \"" + model.name + "\" cannot be empty");
+
+        // The virtual file system only has to live while the model is compiled
+        mjVFS vfs;
+        mj_defaultVFS(&vfs);
+        struct VFSGuard
+        {
+            mjVFS* vfs;
+            ~VFSGuard() { mj_deleteVFS(vfs); }
+        } guard{&vfs};
+
+        auto add_buffer = [&](const std::string& name, const void* buffer, std::size_t size)
+        {
+            if (size > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+                throw std::invalid_argument("The file \"" + name + "\" of the model \"" + model.name
+                                            + "\" is too large");
+            const int result = mj_addBufferVFS(&vfs, name.c_str(), buffer, static_cast<int>(size));
+            if (result == 2)
+                throw std::invalid_argument("The file \"" + name + "\" of the model \"" + model.name
+                                            + "\" is repeated (an asset has the name of the model?)");
+            if (result != 0)
+                throw std::runtime_error("Failed to add the file \"" + name + "\" of the model \""
+                                         + model.name + "\" to the virtual file system");
+        };
+        add_buffer(model.name, model.xml.data(), model.xml.size());
+        for (const auto& [name, content] : model.assets)
+            add_buffer(name, content.data(), content.size());
+
+        char error[1000] = "";
+        mjModel* m = mj_loadXML(model.name.c_str(), &vfs, error, sizeof(error));
+        if (!m)
+            throw std::runtime_error("Failed to load the model \"" + model.name + "\": " + error);
+        _set_model(m, model.name);
+    }
+
+    /**
+     * @brief _set_model replaces the current model by m (which this object then owns), creates its
+     *        data and, in WINDOW mode, prepares the window to render it.
+     * @param xml_model Path or name of the model, used in error messages.
+     */
+    void _set_model(mjModel* m, const std::string& xml_model)
+    {
          // make data corresponding to model
         mjData* d = mj_makeData(m);
         if (!d)
@@ -1173,6 +1216,23 @@ void DQ_MujocoInterface::_check_model() const
 void DQ_MujocoInterface::load_model(const std::string &xml_model)
 {
     impl_->load_model(xml_model);
+}
+
+/**
+ * @brief Load a model held in memory
+ * @param model XML text and the files it refers to (meshes, textures, <include> files).
+ *
+ * Works like load_model(const std::string&), but no file is read from disk: the XML and the
+ * assets are given to MuJoCo through a virtual file system. Use it with the models of the
+ * robots library (e.g., GenericQuadrupedRobot::description().model) or with models built at runtime.
+ *
+ * @throws std::invalid_argument If the name or the XML is empty, or an asset has the name of the model
+ * @throws std::runtime_error If MuJoCo fails to load the model (the message includes MuJoCo's
+ *         error, e.g., a missing asset)
+ */
+void DQ_MujocoInterface::load_model(const DQ_MujocoModel& model)
+{
+    impl_->load_model(model);
 }
 
 

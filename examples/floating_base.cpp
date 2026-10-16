@@ -1,19 +1,29 @@
 /**
+SPDX-License-Identifier: LGPL-3.0-or-later
+Copyright (C) 2025-2026 Juan Jose Quiroz Omana
+
+This file is part of cpp-interface-mujoco, an unofficial interface for C++17 between DQ Robotics
+and MuJoCo: https://github.com/juanjqo/cpp-interface-mujoco
+It uses DQ Robotics (https://dqrobotics.github.io) but is not part of DQ Robotics.
+*/
+
+/**
 Floating base example.
 
 A generic quadruped stands on its "home" keyframe and rocks its trunk by moving the legs with
 position actuators. Every few seconds it gets a push (a change of the trunk twist) that makes it
 slide and turn. The example shows how to:
-  - list the floating bases and the joints of the legs (get_floating_base_names, get_joint_names(true))
-  - start from a keyframe (reset_simulation("home"))
+  - load a robot of the robots library, with no model file (GenericQuadrupedRobot::description())
+  - start from a keyframe (reset_simulation(robot.home_keyframe))
   - follow the robot with the camera (set_camera_tracking)
   - read and write the pose and twist of the trunk (get_base_pose, get_base_twist, set_base_twist)
   - read the pose of any body (get_body_pose)
 
-Run it from the directory that contains quadruped.xml (the build copies it next to the executable).
+The model is embedded in the robots library, so the example runs from any directory.
 */
 
 #include "dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h"
+#include "dqrobotics_extensions/interfaces/mujoco/robots/GenericQuadrupedRobot.h"
 #include <atomic>
 #include <cmath>
 #include <csignal>
@@ -39,16 +49,18 @@ int main()
 {
     std::signal(SIGINT, sig_int_handler);
 
-    DQ_MujocoInterface mi;
-    mi.load_model("quadruped.xml");
+    // The model and the names needed to use it: no file, no hardcoded joint names
+    const DQ_MujocoRobotDescription robot = GenericQuadrupedRobot::description();
 
-    const std::string base = mi.get_floating_base_names().at(0);  // "trunk"
-    // Only the hinge joints of the legs (the free joint of the trunk is excluded):
+    DQ_MujocoInterface mi;
+    mi.load_model(robot.model);
+
+    const std::string& base = robot.floating_base;  // "trunk"
     // FL_hip, FL_knee, FR_hip, FR_knee, RL_hip, RL_knee, RR_hip, RR_knee
-    const std::vector<std::string> jointnames = mi.get_joint_names(true);
+    const std::vector<std::string>& jointnames = robot.joint_names;
     const std::vector<std::string> calves = {"FL_calf", "FR_calf", "RL_calf", "RR_calf"};
 
-    mi.reset_simulation("home");
+    mi.reset_simulation(robot.home_keyframe);
     mi.set_camera_tracking(base);
     mi.set_site_frame_view(false);
 

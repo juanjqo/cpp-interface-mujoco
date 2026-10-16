@@ -1,32 +1,16 @@
 /**
-(C) Copyright 2011-2025 DQ Robotics Developers
+SPDX-License-Identifier: LGPL-3.0-or-later
+Copyright (C) 2025-2026 Juan Jose Quiroz Omana
 
-This file is based on DQ Robotics.
-
-    DQ Robotics is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Lesser General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    DQ Robotics is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Lesser General Public License for more details.
-
-    You should have received a copy of the GNU Lesser General Public License
-    along with DQ Robotics.  If not, see <http://www.gnu.org/licenses/>.
-
-DQ Robotics website: dqrobotics.github.io
-
-Contributors:
-- Juan Jose Quiroz Omana
-       - Responsible for the original implementation.
-
+This file is part of cpp-interface-mujoco, an unofficial interface for C++17 between DQ Robotics
+and MuJoCo: https://github.com/juanjqo/cpp-interface-mujoco
+It uses DQ Robotics (https://dqrobotics.github.io) but is not part of DQ Robotics.
 */
 
 
 #pragma once
 #include <dqrobotics/DQ.h>
+#include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoModel.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -75,6 +59,7 @@ public:
     DQ_MujocoInterface& operator= (const DQ_MujocoInterface&) = delete;
 
     void load_model(const std::string& xml_model);
+    void load_model(const DQ_MujocoModel& model);
 
 
     void trigger_next_simulation_step();

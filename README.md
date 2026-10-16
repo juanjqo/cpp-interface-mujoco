@@ -9,7 +9,8 @@ DQ Robotics can drive a MuJoCo simulation using joint names and dual-quaternion 
 
 ## Features
 
-- Load an MJCF (XML) model and render it in a GLFW window (mouse orbit/pan/zoom, FPS and simulation-time overlay)
+- Load an MJCF (XML) model from a file or from memory, and render it in a GLFW window (mouse orbit/pan/zoom, FPS and
+  simulation-time overlay)
 - Joint space: read positions, velocities and actuator forces; teleport joints; command position, velocity or
   torque actuators
 - Task space: get and set the pose of any site, and get the pose of any body, as a unit dual quaternion
@@ -19,7 +20,9 @@ DQ Robotics can drive a MuJoCo simulation using joint names and dual-quaternion 
 - Visualization toggles: wireframe, joint axes, contact forces, center of mass, site frames
 - Simulation reset, to the initial configuration or to a keyframe of the model
 - Headless mode (no window) for automated tests, CI and batch experiments
-- CMake package: `find_package(dqrobotics-interface-mujoco)` and the target `dqrobotics_extensions::interface-mujoco`
+- Robots library: robot models embedded in the library, loaded by including a header (no model files needed)
+- CMake package: `find_package(dqrobotics-interface-mujoco)` and the targets `dqrobotics_extensions::interface-mujoco`
+  and `dqrobotics_extensions::interface-mujoco-robots`
 
 ## Install
 
@@ -69,6 +72,7 @@ cd ~/git/cpp-interface-mujoco
 # 1. Configure: choose Release, and (optionally) where to install it.
 #    Omit -DCMAKE_INSTALL_PREFIX to use the system default (/usr/local on Linux).
 #    To build only the library, add -DDQ_MUJOCO_BUILD_EXAMPLES=OFF -DDQ_MUJOCO_BUILD_TESTS=OFF
+#    To skip the robots library (embedded robot models), add -DDQ_MUJOCO_BUILD_ROBOTS=OFF
 cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/usr/local
@@ -89,6 +93,7 @@ sudo ldconfig
 ```shell
 # 1. Configure: choose Release, and install to your own prefix instead of a system path.
 #    To build only the library, add -DDQ_MUJOCO_BUILD_EXAMPLES=OFF -DDQ_MUJOCO_BUILD_TESTS=OFF
+#    To skip the robots library (embedded robot models), add -DDQ_MUJOCO_BUILD_ROBOTS=OFF
 cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=$HOME/opt
@@ -136,9 +141,9 @@ cd ~/git/cpp-interface-mujoco/build/examples
 | [`twist_open_loop`](examples/twist_open_loop.cpp) | Commands a floating box with constant twists (no feedback) in `WORLD_FRAME` and `BODY_FRAME`: rise, orbit the world z axis, spin in place, drive in a circle, descend |
 
 The first three examples use [`examples/models/manipulator.xml`](examples/models/manipulator.xml), a generic 6-DoF arm,
-`floating_base` uses [`examples/models/quadruped.xml`](examples/models/quadruped.xml), a generic quadruped, and
-`twist_open_loop` uses [`examples/models/floating_box.xml`](examples/models/floating_box.xml), a box with gravity
+and `twist_open_loop` uses [`examples/models/floating_box.xml`](examples/models/floating_box.xml), a box with gravity
 compensation. They are built from primitive shapes (no mesh files) and copied next to the executables at build time.
+`floating_base` uses `GenericQuadrupedRobot` from the [robots library](#robots-library), so it needs no model file.
 
 ## Tests
 
@@ -147,7 +152,7 @@ cd ~/git/cpp-interface-mujoco
 ctest --test-dir build --output-on-failure
 ```
 
-Most tests run in headless mode. The two that check the window need a display; on a headless machine, run
+Most tests run in headless mode. The ones that check the window need a display; on a headless machine, run
 `xvfb-run -a -s "-screen 0 1280x1024x24" ctest --test-dir build --output-on-failure`, as the
 [CI workflow](.github/workflows/ci.yml) does. If valgrind is installed, an extra test checks the destructor for reads
 of uninitialized memory.
@@ -246,7 +251,7 @@ Instead, address the base by the name of its body, which also works for unnamed 
 [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie) robots):
 
 ```cpp
-mi.load_model("quadruped.xml");
+mi.load_model(GenericQuadrupedRobot::description().model);  // see the robots library below
 mi.reset_simulation("home");        // most legged robots need a standing keyframe to start
 mi.set_camera_tracking("trunk");    // keep the robot in view
 
@@ -308,6 +313,54 @@ MuJoCo stores the velocity of a free joint (`qvel`) in a third, mixed form: the 
 the world frame, followed by the angular velocity in the body frame. The interface converts it, so you never need to
 handle `qvel` directly.
 
+### Robots library
+
+The robots library holds robot models embedded in the library: you load a robot by including its header, with no
+model files to ship or find at runtime. Each robot provides a `DQ_MujocoRobotDescription`, with the model and the
+names needed to use it, so that they are not hardcoded:
+
+```cmake
+target_link_libraries(${YOUR_LIBRARY} PRIVATE dqrobotics_extensions::interface-mujoco-robots)
+```
+
+```cpp
+#include <dqrobotics_extensions/interfaces/mujoco/robots/GenericQuadrupedRobot.h>
+
+const DQ_MujocoRobotDescription robot = GenericQuadrupedRobot::description();
+mi.load_model(robot.model);                                     // from memory
+mi.reset_simulation(robot.home_keyframe);                       // "home"
+VectorXd q = mi.get_joint_positions(robot.joint_names);         // FL_hip, FL_knee, ...
+DQ x_base = mi.get_base_pose(robot.floating_base);              // "trunk"
+DQ x_foot = mi.get_site_pose(robot.end_effector_sites.at(0));   // "FL_foot"
+```
+
+| Robot | Header | Description |
+|---|---|---|
+| `GenericQuadrupedRobot` | [`GenericQuadrupedRobot.h`](robots/include/dqrobotics_extensions/interfaces/mujoco/robots/GenericQuadrupedRobot.h) | Quadruped with 2 joints per leg, built from primitive shapes; floating base `trunk`, feet `FL_foot`, `FR_foot`, `RL_foot`, `RR_foot` |
+
+The models live in [`robots/models`](robots/models). At build time, `dq_mujoco_embed_model()`
+([`cmake/DQMujocoEmbedModel.cmake`](cmake/DQMujocoEmbedModel.cmake)) turns each model directory (the XML and its
+meshes, textures and `<include>` files) into a C++ function that returns a `DQ_MujocoModel`. Steps to add a robot are
+in [`robots/CMakeLists.txt`](robots/CMakeLists.txt). Configure with `-DDQ_MUJOCO_BUILD_ROBOTS=OFF` to skip the library.
+
+### Models in memory
+
+`load_model` also accepts a `DQ_MujocoModel`: the XML text plus the files it refers to, keyed by their path relative
+to the XML as MuJoCo resolves it (including `<compiler meshdir>`). Nothing is read from disk, so models can also be
+generated or modified at runtime:
+
+```cpp
+DQ_MujocoModel model;
+model.name = "robot.xml";
+model.xml = R"(<mujoco>
+                 <compiler meshdir="meshes"/>
+                 <asset><mesh file="link.obj"/></asset>
+                 ...
+               </mujoco>)";
+model.assets["meshes/link.obj"] = link_obj_bytes;  // std::vector<unsigned char>
+mi.load_model(model);
+```
+
 ### Reference frames
 
 To plot a frame (a desired pose, a target, an intermediate frame of your kinematics, ...) you don't need a site in
@@ -339,6 +392,7 @@ but not drawn.
 |---|---|
 | `DQ_MujocoInterface(rendering, title, width, height)` | All arguments are optional (default: a 1280x920 window titled with the model name) |
 | `load_model(xml)` | Load an MJCF file and open the viewer window (unless headless). Can be called again to switch models |
+| `load_model(model)` | Same, from a `DQ_MujocoModel` held in memory (e.g., `GenericQuadrupedRobot::description().model`) |
 | `trigger_next_simulation_step()` | Advance the simulation by one timestep (`mj_step`) |
 | `get_simulation_time()` | Simulation time in seconds |
 | `render()` / `should_close_window()` | Draw a frame and process window events / check whether the window was closed (no-op / `false` when headless) |
@@ -359,4 +413,9 @@ but not drawn.
 
 ## License
 
-[LGPL-3.0-or-later](LICENSE), like [DQ Robotics](https://github.com/dqrobotics/cpp).
+Copyright (C) 2025-2026 Juan Jose Quiroz Omana. Licensed under the [LGPL-3.0-or-later](LICENSE).
+
+This project uses [DQ Robotics](https://github.com/dqrobotics/cpp) (LGPL-3.0-or-later) but is not part of the DQ
+Robotics project. It also uses [MuJoCo](https://github.com/google-deepmind/mujoco) (Apache-2.0), which is downloaded at
+build time and installed with the library; the mouse and scroll handling of the viewer is adapted from MuJoCo's
+`sample/basic.cc`.

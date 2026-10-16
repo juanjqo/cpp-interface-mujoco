@@ -6,10 +6,22 @@ add_custom_target(copy_test_models
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/models ${CMAKE_CURRENT_BINARY_DIR}/models
 )
 
+if(NOT DQ_MUJOCO_BUILD_ROBOTS)
+    message(FATAL_ERROR "The tests need the robots library: configure with -DDQ_MUJOCO_BUILD_ROBOTS=ON")
+endif()
+
 add_executable(test_interface test_interface.cpp)
 # GLFW is linked directly because one test checks the GLFW error state
-target_link_libraries(test_interface PRIVATE dqrobotics_extensions::interface-mujoco glfw)
+target_link_libraries(test_interface PRIVATE dqrobotics_extensions::interface-mujoco-robots glfw)
 add_dependencies(test_interface copy_test_models)
+
+# Embeds tests/models/embedded, to test dq_mujoco_embed_model (DQ_MUJOCO_BUILD_ROBOTS includes it)
+dq_mujoco_embed_model(test_interface
+    FUNCTION  embedded_test_scene
+    DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/models/embedded
+    MAIN      scene.xml
+    ASSETS    parts/arm.xml meshes/tetra.obj data/blob.bin
+)
 
 # Each test runs in its own process, so a crash in one does not hide the others
 set(TESTS
@@ -36,6 +48,10 @@ set(TESTS
     joint_and_floating_base_names
     reset_to_keyframe
     camera_tracking
+    load_model_from_memory
+    load_model_from_memory_errors
+    embedded_model_with_assets
+    generic_quadruped_description
 )
 foreach(test_name IN LISTS TESTS)
     add_test(NAME ${test_name}
