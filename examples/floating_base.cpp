@@ -24,6 +24,7 @@ The model is embedded in the robots library, so the example runs from any direct
 
 #include "dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h"
 #include "dqrobotics_extensions/interfaces/mujoco/robots/GenericQuadrupedRobot.h"
+#include <marinholab/sas/core/sas_clock.hpp>
 #include <atomic>
 #include <cmath>
 #include <csignal>
@@ -32,6 +33,7 @@ The model is embedded in the robots library, so the example runs from any direct
 using namespace DQ_robotics;
 using namespace DQ_robotics_extensions;
 using namespace Eigen;
+using marinholab::sas::core::Clock;
 
 /*********************************************
  * SIGNAL HANDLER
@@ -71,34 +73,34 @@ int main()
     double next_push_time = 3.0;
     double next_print_time = 0.0;
 
+    // The simulation runs in real time in its own thread, and the window is drawn automatically
+    mi.start_simulation();
+
+    // Control loop at 500 Hz
+    Clock clock(0.002);
+    clock.init();
     while (!mi.should_close_window() && !kill_this_process)
     {
-        double simstart = mi.get_simulation_time();
-        while (mi.get_simulation_time() - simstart < 1.0/60.0)
+        const double t = mi.get_simulation_time();
+
+        // Rock the trunk: the front and rear legs bend in opposite phase. The knee moves twice
+        // as much as the hip, which keeps each foot right below its hip.
+        const double front_hip = 0.6 + 0.25*sin(2.0*t);
+        const double rear_hip  = 0.6 - 0.25*sin(2.0*t);
+        VectorXd q_ref(8);
+        q_ref << front_hip, -2.0*front_hip,  front_hip, -2.0*front_hip,
+                 rear_hip,  -2.0*rear_hip,   rear_hip,  -2.0*rear_hip;
+        mi.set_joint_target_positions(jointnames, q_ref);
+
+        // Push: add a sideways velocity and a yaw rate to the current twist of the trunk.
+        // A twist is xi = w + E_*(p_dot + cross(p, w)), with everything in the world frame.
+        if (t >= next_push_time)
         {
-            const double t = mi.get_simulation_time();
-
-            // Rock the trunk: the front and rear legs bend in opposite phase. The knee moves twice
-            // as much as the hip, which keeps each foot right below its hip.
-            const double front_hip = 0.6 + 0.25*sin(2.0*t);
-            const double rear_hip  = 0.6 - 0.25*sin(2.0*t);
-            VectorXd q_ref(8);
-            q_ref << front_hip, -2.0*front_hip,  front_hip, -2.0*front_hip,
-                     rear_hip,  -2.0*rear_hip,   rear_hip,  -2.0*rear_hip;
-            mi.set_joint_target_positions(jointnames, q_ref);
-
-            // Push: add a sideways velocity and a yaw rate to the current twist of the trunk.
-            // A twist is xi = w + E_*(p_dot + cross(p, w)), with everything in the world frame.
-            if (t >= next_push_time)
-            {
-                const DQ p = mi.get_base_pose(base).translation();
-                const DQ w = 3.0*k_;
-                const DQ p_dot = 0.8*j_;
-                mi.set_base_twist(base, mi.get_base_twist(base) + w + E_*(p_dot + cross(p, w)));
-                next_push_time += 4.0;
-            }
-
-            mi.trigger_next_simulation_step();
+            const DQ p = mi.get_base_pose(base).translation();
+            const DQ w = 3.0*k_;
+            const DQ p_dot = 0.8*j_;
+            mi.set_base_twist(base, mi.get_base_twist(base) + w + E_*(p_dot + cross(p, w)));
+            next_push_time += 4.0;
         }
 
         const DQ x_base = mi.get_base_pose(base);
@@ -106,16 +108,17 @@ int main()
         for (const auto& calf : calves)
             mi.set_reference_frame_pose(calf, mi.get_body_pose(calf));
 
-        if (mi.get_simulation_time() >= next_print_time)
+        if (t >= next_print_time)
         {
             const DQ xi = mi.get_base_twist(base);
-            std::cout << "t = " << mi.get_simulation_time()
+            std::cout << "t = " << t
                       << "  trunk position: " << x_base.translation().vec3().transpose()
                       << "  angular velocity: " << xi.P().vec3().transpose() << std::endl;
             next_print_time += 1.0;
         }
 
-        mi.render();
+        clock.update_and_sleep();
     }
+    mi.stop_simulation();
     return 0;
 }

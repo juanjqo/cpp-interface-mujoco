@@ -20,6 +20,7 @@ directory.
 
 #include "dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h"
 #include "dqrobotics_extensions/interfaces/mujoco/robots/GenericManipulatorRobot.h"
+#include <marinholab/sas/core/sas_clock.hpp>
 #include <atomic>
 #include <cmath>
 #include <csignal>
@@ -28,6 +29,7 @@ directory.
 using namespace DQ_robotics;
 using namespace DQ_robotics_extensions;
 using namespace Eigen;
+using marinholab::sas::core::Clock;
 
 /*********************************************
  * SIGNAL HANDLER
@@ -61,25 +63,31 @@ int main()
     mi.reset_simulation(robot.home_keyframe);
     const VectorXd q_home = mi.get_joint_positions(jointnames);
 
+    // The simulation runs in real time in its own thread, and the window is drawn automatically
+    mi.start_simulation();
+
+    // Control loop at 500 Hz, like the control loop of a real robot
+    Clock clock(0.002);
+    clock.init();
+    double next_print_time = 0.0;
     while (!mi.should_close_window() && !kill_this_process)
     {
-        // Simulate 1/60 s per rendered frame, so the simulation runs in real time with v-sync
-        double simstart = mi.get_simulation_time();
-        while (mi.get_simulation_time() - simstart < 1.0/60.0)
+        const double t = mi.get_simulation_time();
+        VectorXd q_ref = q_home + VectorXd::Constant(q_home.size(), 0.3 * sin(2.0 * t));
+        mi.set_joint_target_positions(jointnames, q_ref);
+
+        if (t >= next_print_time)
         {
-            const double t = mi.get_simulation_time();
-            VectorXd q_ref = q_home + VectorXd::Constant(q_home.size(), 0.3 * sin(2.0 * t));
-            mi.set_joint_target_positions(jointnames, q_ref);
-            mi.trigger_next_simulation_step();
+            std::cout << "--------------------------------------" << std::endl;
+            std::cout << "t:     " << t << " s (real-time factor " << mi.get_real_time_factor() << ")" << std::endl;
+            std::cout << "q:     " << mi.get_joint_positions(jointnames).transpose() << std::endl;
+            std::cout << "q_dot: " << mi.get_joint_velocities(jointnames).transpose() << std::endl;
+            std::cout << "tau:   " << mi.get_joint_forces(jointnames).transpose() << std::endl;
+            next_print_time += 0.1;
         }
 
-        std::cout << "--------------------------------------" << std::endl;
-        std::cout << "t:     " << mi.get_simulation_time() << " s" << std::endl;
-        std::cout << "q:     " << mi.get_joint_positions(jointnames).transpose() << std::endl;
-        std::cout << "q_dot: " << mi.get_joint_velocities(jointnames).transpose() << std::endl;
-        std::cout << "tau:   " << mi.get_joint_forces(jointnames).transpose() << std::endl;
-
-        mi.render();
+        clock.update_and_sleep();
     }
+    mi.stop_simulation();
     return 0;
 }

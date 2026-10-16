@@ -9,8 +9,11 @@ DQ Robotics can drive a MuJoCo simulation using joint names and dual-quaternion 
 
 ## Features
 
-- Load an MJCF (XML) model from a file or from memory, and render it in a GLFW window (mouse orbit/pan/zoom, FPS and
-  simulation-time overlay)
+- Load an MJCF (XML) model from a file or from memory, and draw it in a GLFW window (mouse orbit/pan/zoom, FPS,
+  simulation-time and real-time-factor overlay). A viewer thread draws the window: no render calls are needed
+- Real-time simulation: `start_simulation()` runs the physics in its own thread, in real time, like a real robot. The
+  program reads the state and sends commands at its own rate, and never waits for a simulation step. Or step the
+  simulation yourself with `trigger_next_simulation_step()`
 - Joint space: read positions, velocities and actuator forces; teleport joints; command position, velocity or
   torque actuators
 - Task space: get and set the pose of any site, and get the pose of any body, as a unit dual quaternion
@@ -36,6 +39,7 @@ DQ Robotics can drive a MuJoCo simulation using joint names and dual-quaternion 
 | Dependency | How it is obtained |
 |---|---|
 | [MuJoCo](https://github.com/google-deepmind/mujoco) 3.9.0 | Downloaded and built automatically by CMake (`FetchContent`), and installed together with this library |
+| [sas_cpp](https://github.com/MarinhoLab/sas_cpp) (`marinholab_sas_core`) | Its `ThreadManager` runs the physics and viewer threads. The installed package is used if found (`libmarinholab-sas-core` from the SmartArmStack apt repository); otherwise it is downloaded and built automatically, and installed together with this library |
 | [DQ Robotics C++](https://github.com/dqrobotics/cpp) | Install manually (see below) |
 | Eigen3, GLFW, OpenGL | System packages |
 
@@ -134,11 +138,11 @@ cd ~/git/cpp-interface-mujoco/build/examples
 
 | Example | What it shows |
 |---|---|
-| [`joint_control`](examples/joint_control.cpp) | Sinusoidal joint references tracked by position actuators; prints joint positions, velocities and torques |
+| [`joint_control`](examples/joint_control.cpp) | Real-time simulation with a 500 Hz control loop: sinusoidal joint references tracked by position actuators; prints joint positions, velocities, torques and the real-time factor |
 | [`site_poses`](examples/site_poses.cpp) | Moves a free-standing `target` frame with `set_site_pose` and reads the `end_effector` frame with `get_site_pose` |
 | [`reference_frames`](examples/reference_frames.cpp) | Draws desired, measured and fixed reference frames, plus a trail of past poses created and removed on the fly |
 | [`floating_base`](examples/floating_base.cpp) | A quadruped starts from its `home` keyframe, rocks its trunk with the leg actuators and gets pushed with `set_base_twist`; the camera follows it |
-| [`twist_open_loop`](examples/twist_open_loop.cpp) | Commands a floating box with constant twists (no feedback) in `WORLD_FRAME` and `BODY_FRAME`: rise, orbit the world z axis, spin in place, drive in a circle, descend |
+| [`twist_open_loop`](examples/twist_open_loop.cpp) | Stepped simulation paced by a sas `Clock`: commands a floating box with constant twists (no feedback) in `WORLD_FRAME` and `BODY_FRAME`, before every step: rise, orbit the world z axis, spin in place, drive in a circle, descend |
 
 The first three examples use `GenericManipulatorRobot`, a generic 6-DoF arm, and `floating_base` uses
 `GenericQuadrupedRobot`, both from the [robots library](#robots-library), so they need no model files.
@@ -185,23 +189,48 @@ int main()
     mi.reset_simulation(robot.home_keyframe);  // initial configuration from a keyframe
     const VectorXd q_home = mi.get_joint_positions(joints);
 
-    while (!mi.should_close_window())
+    mi.start_simulation();  // the physics runs in real time in its own thread; the window draws itself
+
+    marinholab::sas::core::Clock clock(0.002);  // your control loop: 500 Hz
+    clock.init();
+    while (!mi.should_close_window())  // also processes the window events
     {
-        // Advance the physics in real time at 60 Hz rendering
-        double t0 = mi.get_simulation_time();
-        while (mi.get_simulation_time() - t0 < 1.0/60.0)
-        {
-            VectorXd q = mi.get_joint_positions(joints);
-            VectorXd q_ref = q_home + VectorXd::Constant(joints.size(), 0.2*sin(mi.get_simulation_time()));
-            mi.set_joint_target_positions(joints, q_ref);  // drives the position actuators
-            mi.trigger_next_simulation_step();
-        }
+        VectorXd q = mi.get_joint_positions(joints);
+        VectorXd q_ref = q_home + VectorXd::Constant(joints.size(), 0.2*sin(mi.get_simulation_time()));
+        mi.set_joint_target_positions(joints, q_ref);  // drives the position actuators
 
         DQ x = mi.get_site_pose(robot.end_effector_sites.at(0));  // site pose as a unit dual quaternion
-        mi.render();
+        clock.update_and_sleep();
     }
+    mi.stop_simulation();
 }
 ```
+
+(`#include <marinholab/sas/core/sas_clock.hpp>` and link `marinholab::sas::core` for the `Clock`; any other way of
+pacing the loop works too.)
+
+### Real time and stepped simulation
+
+There are two ways to run the simulation. In both, a viewer thread draws the window at 60 Hz, so there is nothing to
+render; just call `should_close_window()` regularly from the main thread (e.g., as the loop condition), since GLFW
+only processes the window events (mouse, resize, close) there.
+
+| | Real time: `start_simulation()` ... `stop_simulation()` | Stepped: `trigger_next_simulation_step()` |
+|---|---|---|
+| Who advances the time | A physics thread, which keeps the simulation time equal to the wall-clock time | Your program, one timestep per call |
+| Your loop | Runs at its own rate (e.g., 500 Hz with a sas `Clock`), like the control loop of a real robot | Must pace itself if it should run in real time; otherwise the simulation runs as fast as possible |
+| Getters (`get_*`) | Read the state published after the last step: they never wait for a step (about 1 µs) | Read the current state |
+| Commands (`set_joint_target_*`) | Applied before the next step | Applied at the next `trigger_next_simulation_step()` |
+| Teleports (`set_joint_positions`, `set_base_pose`, `reset_simulation`, ...) | Take effect at once (they wait for the step in progress) | Take effect at once |
+| Use it for | Demos, teleoperation, controllers that will run on a real robot | Deterministic experiments, CI, per-step control |
+
+If the computer cannot keep up, the real-time simulation runs as fast as it can; `get_real_time_factor()` and the
+window overlay show the simulated time per wall-clock time. `trigger_next_simulation_step()` throws while the
+simulation runs in real time, and `load_model()` stops it.
+
+In stepped mode, nothing slows the loop down: without pacing, the simulation runs as fast as the computer allows. To
+step it in real time, pace the loop (e.g., with a sas `Clock`, as in [`twist_open_loop`](examples/twist_open_loop.cpp)),
+or use `start_simulation()`.
 
 ### Window and headless mode
 
@@ -211,8 +240,8 @@ DQ_MujocoInterface custom(DQ_MujocoInterface::RENDERING::WINDOW, "My simulation"
 DQ_MujocoInterface headless(DQ_MujocoInterface::RENDERING::HEADLESS);  // no window, no display needed
 ```
 
-In headless mode, `render()` does nothing and `should_close_window()` always returns `false`, so the same simulation
-loop works in both modes.
+In headless mode, no window is opened and `should_close_window()` always returns `false`, so the same simulation loop
+works in both modes. Real-time and stepped simulation work in both.
 
 ### Joint commands and actuators
 
@@ -351,7 +380,6 @@ const DQ x_trunk = mi.get_base_pose(robot.floating_base);
 const VectorXd q_FL = mi.get_joint_positions({robot.joint_names.at(0), robot.joint_names.at(1)});
 
 DQ x_foot = x_trunk*legs.at(0).fkm(q_FL);                       // = mi.get_site_pose("FL_foot")
-MatrixXd J_foot = hamiplus8(x_trunk)*legs.at(0).pose_jacobian(q_FL);  // world frame, w.r.t. q_FL
 ```
 
 The models live in [`robots/models`](robots/models). At build time, `dq_mujoco_embed_model()`
@@ -392,7 +420,6 @@ while (!mi.should_close_window())
     mi.set_reference_frame_pose("x_desired", x_desired);             // any unit dual quaternion
     mi.set_reference_frame_pose("x", mi.get_site_pose("end_effector"));
     ...
-    mi.render();
 }
 
 mi.remove_reference_frame("x_desired");
@@ -409,9 +436,11 @@ but not drawn.
 | `DQ_MujocoInterface(rendering, title, width, height)` | All arguments are optional (default: a 1280x920 window titled with the model name) |
 | `load_model(xml)` | Load an MJCF file and open the viewer window (unless headless). Can be called again to switch models |
 | `load_model(model)` | Same, from a `DQ_MujocoModel` held in memory (e.g., `GenericQuadrupedRobot::description().model`) |
-| `trigger_next_simulation_step()` | Advance the simulation by one timestep (`mj_step`) |
+| `start_simulation()` / `stop_simulation()` / `is_simulation_running()` | Run the simulation in real time in a physics thread / stop it (the state is kept) / whether it runs |
+| `get_real_time_factor()` | Simulated time per wall-clock time over the last 0.5 s (0 when not running) |
+| `trigger_next_simulation_step()` | Advance the simulation by one timestep (`mj_step`), when it is not running in real time |
 | `get_simulation_time()` | Simulation time in seconds |
-| `render()` / `should_close_window()` | Draw a frame and process window events / check whether the window was closed (no-op / `false` when headless) |
+| `should_close_window()` | Process the window events and check whether the window was closed (`false` when headless) |
 | `reset_simulation()` / `reset_simulation(keyframe)` | Reset the state to the model's initial configuration or to a keyframe |
 | `get_joint_names(only_single_dof)` | Names of all joints in the model, or only of the named hinge and slide joints |
 | `get_joint_positions/velocities/forces(names)` | Joint state and actuator forces (`qfrc_actuator`) |
@@ -434,4 +463,5 @@ Copyright (C) 2025-2026 Juan Jose Quiroz Omana. Licensed under the [LGPL-3.0-or-
 This project uses [DQ Robotics](https://github.com/dqrobotics/cpp) (LGPL-3.0-or-later) but is not part of the DQ
 Robotics project. It also uses [MuJoCo](https://github.com/google-deepmind/mujoco) (Apache-2.0), which is downloaded at
 build time and installed with the library; the mouse and scroll handling of the viewer is adapted from MuJoCo's
-`sample/basic.cc`.
+`sample/basic.cc`. Its threads are run by [sas_cpp](https://github.com/MarinhoLab/sas_cpp) (LGPL-3.0), which prints
+its license notice when a thread is created.

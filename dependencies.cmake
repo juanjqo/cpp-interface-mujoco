@@ -58,5 +58,16 @@ if(APPLE)
     )
 endif()
 
-
-
+# sas (https://github.com/MarinhoLab/sas_cpp): the ThreadManager runs the physics and viewer threads.
+# Use the installed package (libmarinholab-sas-core) if found, otherwise build it from source.
+find_package(marinholab_sas_core QUIET)
+if(NOT marinholab_sas_core_FOUND)
+    message(STATUS "marinholab_sas_core not found: fetching sas_cpp")
+    set(MARINHO_LAB_SAS_CORE_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        sas_cpp
+        GIT_REPOSITORY https://github.com/MarinhoLab/sas_cpp.git
+        GIT_TAG 78cf20cc1753bd5bd63d32f02c76f9b82192e404
+    )
+    FetchContent_MakeAvailable(sas_cpp)
+endif()

@@ -26,6 +26,8 @@ foreach(example IN LISTS EXAMPLES)
     else()
         target_link_libraries(${example} PRIVATE dqrobotics_extensions::interface-mujoco)
     endif()
+    # The examples pace their loops with a sas Clock
+    target_link_libraries(${example} PRIVATE marinholab::sas::core)
     # Building a single example (e.g., from an IDE) must also copy the models
     add_dependencies(${example} copy_example_models)
 endforeach()

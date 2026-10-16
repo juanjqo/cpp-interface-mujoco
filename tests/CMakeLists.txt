@@ -48,6 +48,9 @@ set(TESTS
     joint_and_floating_base_names
     reset_to_keyframe
     camera_tracking
+    real_time_simulation
+    commands_and_teleports_while_running
+    viewer_draws_in_both_modes
     load_model_from_memory
     load_model_from_memory_errors
     embedded_model_with_assets
