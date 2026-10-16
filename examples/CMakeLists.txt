@@ -6,13 +6,13 @@ add_custom_target(copy_example_models
 )
 
 set(EXAMPLES
-    joint_control
-    site_poses
-    reference_frames
     twist_open_loop
 )
 # Examples that use the robots library (DQ_MUJOCO_BUILD_ROBOTS=ON)
 set(ROBOT_EXAMPLES
+    joint_control
+    site_poses
+    reference_frames
     floating_base
 )
 if(DQ_MUJOCO_BUILD_ROBOTS)

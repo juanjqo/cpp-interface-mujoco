@@ -14,10 +14,12 @@ Moves every joint of the generic manipulator with a sinusoidal reference around 
 configuration, using MuJoCo's position actuators, and prints the joint positions,
 velocities and actuator torques.
 
-Run it from the directory that contains manipulator.xml (the build copies it next to the executable).
+The model is embedded in the robots library (GenericManipulatorRobot), so the example runs from any
+directory.
 */
 
 #include "dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h"
+#include "dqrobotics_extensions/interfaces/mujoco/robots/GenericManipulatorRobot.h"
 #include <atomic>
 #include <cmath>
 #include <csignal>
@@ -43,21 +45,21 @@ int main()
 {
     std::signal(SIGINT, sig_int_handler);
 
+    const DQ_MujocoRobotDescription robot = GenericManipulatorRobot::description();
+
     DQ_MujocoInterface mi;
-    mi.load_model("manipulator.xml");
+    mi.load_model(robot.model);
 
     //mi.set_wireframe_view(true);
     //mi.set_joint_view(true);
     //mi.set_contact_view(true);
     //mi.set_center_of_mass_view(true);
 
-    const std::vector<std::string> jointnames = mi.get_joint_names();
-    const int n = jointnames.size();
+    const std::vector<std::string>& jointnames = robot.joint_names;
 
-    // Start from a bent configuration instead of the arm pointing straight up
-    VectorXd q_home(n);
-    q_home << 0.0, 0.5, 1.2, 0.0, 1.0, 0.0;
-    mi.set_joint_positions(jointnames, q_home);
+    // Start from the "home" keyframe, a bent configuration, instead of the arm pointing straight up
+    mi.reset_simulation(robot.home_keyframe);
+    const VectorXd q_home = mi.get_joint_positions(jointnames);
 
     while (!mi.should_close_window() && !kill_this_process)
     {
@@ -66,7 +68,7 @@ int main()
         while (mi.get_simulation_time() - simstart < 1.0/60.0)
         {
             const double t = mi.get_simulation_time();
-            VectorXd q_ref = q_home + VectorXd::Constant(n, 0.3 * sin(2.0 * t));
+            VectorXd q_ref = q_home + VectorXd::Constant(q_home.size(), 0.3 * sin(2.0 * t));
             mi.set_joint_target_positions(jointnames, q_ref);
             mi.trigger_next_simulation_step();
         }

@@ -140,10 +140,10 @@ cd ~/git/cpp-interface-mujoco/build/examples
 | [`floating_base`](examples/floating_base.cpp) | A quadruped starts from its `home` keyframe, rocks its trunk with the leg actuators and gets pushed with `set_base_twist`; the camera follows it |
 | [`twist_open_loop`](examples/twist_open_loop.cpp) | Commands a floating box with constant twists (no feedback) in `WORLD_FRAME` and `BODY_FRAME`: rise, orbit the world z axis, spin in place, drive in a circle, descend |
 
-The first three examples use [`examples/models/manipulator.xml`](examples/models/manipulator.xml), a generic 6-DoF arm,
-and `twist_open_loop` uses [`examples/models/floating_box.xml`](examples/models/floating_box.xml), a box with gravity
-compensation. They are built from primitive shapes (no mesh files) and copied next to the executables at build time.
-`floating_base` uses `GenericQuadrupedRobot` from the [robots library](#robots-library), so it needs no model file.
+The first three examples use `GenericManipulatorRobot`, a generic 6-DoF arm, and `floating_base` uses
+`GenericQuadrupedRobot`, both from the [robots library](#robots-library), so they need no model files.
+`twist_open_loop` uses [`examples/models/floating_box.xml`](examples/models/floating_box.xml), a box with gravity
+compensation, which is copied next to the executables at build time.
 
 ## Tests
 
@@ -162,10 +162,13 @@ of uninitialized memory.
 ```cmake
 find_package(dqrobotics-interface-mujoco REQUIRED)
 target_link_libraries(${YOUR_LIBRARY} PRIVATE dqrobotics_extensions::interface-mujoco)
+# for the robot models (GenericManipulatorRobot below); it also links the interface
+target_link_libraries(${YOUR_LIBRARY} PRIVATE dqrobotics_extensions::interface-mujoco-robots)
 ```
 
 ```cpp
 #include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h>
+#include <dqrobotics_extensions/interfaces/mujoco/robots/GenericManipulatorRobot.h>
 
 using namespace DQ_robotics;             // DQ, i_, j_, k_, E_, ...
 using namespace DQ_robotics_extensions;  // DQ_MujocoInterface
@@ -173,13 +176,14 @@ using namespace Eigen;
 
 int main()
 {
-    DQ_MujocoInterface mi;
-    mi.load_model("manipulator.xml");
+    const DQ_MujocoRobotDescription robot = GenericManipulatorRobot::description();
 
-    std::vector<std::string> joints = mi.get_joint_names();
-    VectorXd q_home(6);
-    q_home << 0.0, 0.5, 1.2, 0.0, 1.0, 0.0;
-    mi.set_joint_positions(joints, q_home);  // initial configuration (teleport)
+    DQ_MujocoInterface mi;
+    mi.load_model(robot.model);  // or, for your own model file: mi.load_model("my_robot.xml")
+
+    const std::vector<std::string>& joints = robot.joint_names;
+    mi.reset_simulation(robot.home_keyframe);  // initial configuration from a keyframe
+    const VectorXd q_home = mi.get_joint_positions(joints);
 
     while (!mi.should_close_window())
     {
@@ -193,7 +197,7 @@ int main()
             mi.trigger_next_simulation_step();
         }
 
-        DQ x = mi.get_site_pose("end_effector");  // pose of a site as a unit dual quaternion
+        DQ x = mi.get_site_pose(robot.end_effector_sites.at(0));  // site pose as a unit dual quaternion
         mi.render();
     }
 }
@@ -229,7 +233,8 @@ for initialization and resets, not for control.
 `get_site_pose` and `set_site_pose` work with [sites](https://mujoco.readthedocs.io/en/stable/XMLreference.html#body-site),
 which are frames with no physics. They are useful as end-effector frames or as visual targets. `set_site_pose` stores
 the pose relative to the site's parent body: a site in the `worldbody` stays fixed in the world, and a site on a robot
-link moves with that link. The example manipulator has both kinds:
+link moves with that link. The generic manipulator of the robots library
+([`generic_manipulator.xml`](robots/models/generic_manipulator/generic_manipulator.xml)) has both kinds:
 
 ```xml
 <worldbody>
@@ -336,7 +341,31 @@ DQ x_foot = mi.get_site_pose(robot.end_effector_sites.at(0));   // "FL_foot"
 
 | Robot | Header | Description |
 |---|---|---|
-| `GenericQuadrupedRobot` | [`GenericQuadrupedRobot.h`](robots/include/dqrobotics_extensions/interfaces/mujoco/robots/GenericQuadrupedRobot.h) | Quadruped with 2 joints per leg, built from primitive shapes; floating base `trunk`, feet `FL_foot`, `FR_foot`, `RL_foot`, `RR_foot` |
+| `GenericManipulatorRobot` | [`GenericManipulatorRobot.h`](robots/include/dqrobotics_extensions/interfaces/mujoco/robots/GenericManipulatorRobot.h) | 6-DoF arm built from primitive shapes, with position actuators; fixed base, end effector `end_effector`, keyframe `home`. Also has a free-standing `target` site in the world. `kinematics()` returns its `DQ_SerialManipulatorDH` |
+| `GenericQuadrupedRobot` | [`GenericQuadrupedRobot.h`](robots/include/dqrobotics_extensions/interfaces/mujoco/robots/GenericQuadrupedRobot.h) | Quadruped with 2 joints per leg, built from primitive shapes; floating base `trunk`, feet `FL_foot`, `FR_foot`, `RL_foot`, `RR_foot`, keyframe `home`. `kinematics()` returns one `DQ_SerialManipulatorDH` per leg, in the trunk frame |
+
+Robots can also provide their DQ Robotics kinematic model, which matches the MuJoCo model (a test checks that
+`fkm(q)` equals the pose of the end-effector site), so a controller and the simulation share the same geometry:
+
+```cpp
+DQ_SerialManipulatorDH arm = GenericManipulatorRobot::kinematics();
+VectorXd q = mi.get_joint_positions(robot.joint_names);  // same joint order
+DQ x = arm.fkm(q);                                       // = mi.get_site_pose("end_effector")
+MatrixXd J = arm.pose_jacobian(q);
+```
+
+For a floating-base robot, the limbs are expressed in the frame of the floating base, so the world pose is the base
+pose times the limb pose. `GenericQuadrupedRobot::kinematics()` returns the legs in the order of
+`end_effector_sites` (FL, FR, RL, RR); leg `i` has the joints `joint_names[2i]` (hip) and `joint_names[2i+1]` (knee):
+
+```cpp
+std::vector<DQ_SerialManipulatorDH> legs = GenericQuadrupedRobot::kinematics();
+const DQ x_trunk = mi.get_base_pose(robot.floating_base);
+const VectorXd q_FL = mi.get_joint_positions({robot.joint_names.at(0), robot.joint_names.at(1)});
+
+DQ x_foot = x_trunk*legs.at(0).fkm(q_FL);                       // = mi.get_site_pose("FL_foot")
+MatrixXd J_foot = hamiplus8(x_trunk)*legs.at(0).pose_jacobian(q_FL);  // world frame, w.r.t. q_FL
+```
 
 The models live in [`robots/models`](robots/models). At build time, `dq_mujoco_embed_model()`
 ([`cmake/DQMujocoEmbedModel.cmake`](cmake/DQMujocoEmbedModel.cmake)) turns each model directory (the XML and its

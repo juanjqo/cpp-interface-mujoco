@@ -52,6 +52,9 @@ set(TESTS
     load_model_from_memory_errors
     embedded_model_with_assets
     generic_quadruped_description
+    generic_manipulator_description
+    generic_manipulator_kinematics
+    generic_quadruped_kinematics
 )
 foreach(test_name IN LISTS TESTS)
     add_test(NAME ${test_name}

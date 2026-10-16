@@ -13,11 +13,17 @@ include(${PROJECT_SOURCE_DIR}/cmake/DQMujocoEmbedModel.cmake)
 set(ROBOTS_TARGET ${PROJECT_NAME}-robots)
 
 add_library(${ROBOTS_TARGET}
+    src/GenericManipulatorRobot.cpp
     src/GenericQuadrupedRobot.cpp
 )
 add_library(dqrobotics_extensions::interface-mujoco-robots ALIAS ${ROBOTS_TARGET})
 set_target_properties(${ROBOTS_TARGET} PROPERTIES EXPORT_NAME interface-mujoco-robots)
 
+dq_mujoco_embed_model(${ROBOTS_TARGET}
+    FUNCTION  generic_manipulator
+    DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/models/generic_manipulator
+    MAIN      generic_manipulator.xml
+)
 dq_mujoco_embed_model(${ROBOTS_TARGET}
     FUNCTION  generic_quadruped
     DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/models/generic_quadruped

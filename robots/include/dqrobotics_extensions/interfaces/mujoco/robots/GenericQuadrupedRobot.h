@@ -9,7 +9,9 @@ It uses DQ Robotics (https://dqrobotics.github.io) but is not part of DQ Robotic
 
 
 #pragma once
+#include <dqrobotics/robot_modeling/DQ_SerialManipulatorDH.h>
 #include <dqrobotics_extensions/interfaces/mujoco/robots/DQ_MujocoRobotDescription.h>
+#include <vector>
 
 namespace DQ_robotics_extensions
 {
@@ -22,6 +24,7 @@ namespace DQ_robotics_extensions
  *   left/right), all about the y axis and driven by position actuators.
  * - End effectors: the sites FL_foot, FR_foot, RL_foot, RR_foot, at the center of each foot.
  * - Keyframe "home": standing on the floor, with the actuators holding the pose.
+ * - kinematics(): the DQ Robotics model of each leg, in the trunk frame (see kinematics()).
  *
  * Example:
  * @code
@@ -30,12 +33,18 @@ namespace DQ_robotics_extensions
  * const auto robot = GenericQuadrupedRobot::description();
  * mi.load_model(robot.model);
  * mi.reset_simulation(robot.home_keyframe);
+ *
+ * // Pose of the front-left foot in the world
+ * std::vector<DQ_SerialManipulatorDH> legs = GenericQuadrupedRobot::kinematics();
+ * VectorXd q_FL = mi.get_joint_positions({robot.joint_names.at(0), robot.joint_names.at(1)});
+ * DQ x_foot = mi.get_base_pose(robot.floating_base) * legs.at(0).fkm(q_FL);  // = get_site_pose("FL_foot")
  * @endcode
  */
 class GenericQuadrupedRobot
 {
 public:
     static DQ_MujocoRobotDescription description();
+    static std::vector<DQ_robotics::DQ_SerialManipulatorDH> kinematics();
 };
 
 }

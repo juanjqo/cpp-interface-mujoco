@@ -16,10 +16,12 @@ Sites are frames with no physics. This example:
   - reads the pose of the "end_effector" site, attached to the last link, with get_site_pose()
 and prints both poses and the distance between them.
 
-Run it from the directory that contains manipulator.xml (the build copies it next to the executable).
+The model is embedded in the robots library (GenericManipulatorRobot), so the example runs from any
+directory.
 */
 
 #include "dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h"
+#include "dqrobotics_extensions/interfaces/mujoco/robots/GenericManipulatorRobot.h"
 #include <atomic>
 #include <cmath>
 #include <csignal>
@@ -45,15 +47,15 @@ int main()
 {
     std::signal(SIGINT, sig_int_handler);
 
+    const DQ_MujocoRobotDescription robot = GenericManipulatorRobot::description();
+
     DQ_MujocoInterface mi;
-    mi.load_model("manipulator.xml");
+    mi.load_model(robot.model);
 
-    const std::vector<std::string> jointnames = mi.get_joint_names();
-    const int n = jointnames.size();
+    const std::vector<std::string>& jointnames = robot.joint_names;
 
-    VectorXd q_home(n);
-    q_home << 0.0, 0.5, 1.2, 0.0, 1.0, 0.0;
-    mi.set_joint_positions(jointnames, q_home);
+    mi.reset_simulation(robot.home_keyframe);  // q = (0, 0.5, 1.2, 0, 1.0, 0)
+    const VectorXd q_home = mi.get_joint_positions(jointnames);
 
     while (!mi.should_close_window() && !kill_this_process)
     {
@@ -77,7 +79,7 @@ int main()
         }
 
         DQ x_target = mi.get_site_pose("target");
-        DQ x_effector = mi.get_site_pose("end_effector");
+        DQ x_effector = mi.get_site_pose(robot.end_effector_sites.at(0));
         VectorXd p_target = x_target.translation().vec3();
         VectorXd p_effector = x_effector.translation().vec3();
 

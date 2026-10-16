@@ -22,6 +22,7 @@ display; on a headless machine, use xvfb-run.
 */
 
 #include "dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h"
+#include "dqrobotics_extensions/interfaces/mujoco/robots/GenericManipulatorRobot.h"
 #include "dqrobotics_extensions/interfaces/mujoco/robots/GenericQuadrupedRobot.h"
 #include <GLFW/glfw3.h>
 #include <cmath>
@@ -30,6 +31,7 @@ display; on a headless machine, use xvfb-run.
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <random>
 
 using namespace DQ_robotics;
 using namespace DQ_robotics_extensions;
@@ -635,6 +637,139 @@ static void generic_quadruped_description()
         CHECK(std::abs(mi.get_site_pose(site).translation().q(3)) < 0.03);
 }
 
+static void generic_manipulator_description()
+{
+    const DQ_MujocoRobotDescription robot = GenericManipulatorRobot::description();
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(robot.model);
+    mi.reset_simulation(robot.home_keyframe);
+
+    // The names in the description match the model (fixed base: no floating base)
+    CHECK(robot.floating_base.empty());
+    CHECK(mi.get_floating_base_names().empty());
+    CHECK(mi.get_joint_names(true) == robot.joint_names);
+    CHECK(robot.end_effector_sites == std::vector<std::string>{"end_effector"});
+
+    // The keyframe is the documented home configuration, and the actuators hold it. The position
+    // actuators are PD controllers, so gravity leaves a steady offset (about 0.02 rad, mostly at
+    // the shoulder).
+    const VectorXd q_home = vec({0.0, 0.5, 1.2, 0.0, 1.0, 0.0});
+    CHECK_NEAR((mi.get_joint_positions(robot.joint_names) - q_home).norm(), 0.0);
+    for (int i = 0; i < 1000; i++)
+        mi.trigger_next_simulation_step();
+    CHECK((mi.get_joint_positions(robot.joint_names) - q_home).norm() < 0.05);
+
+    // At q = 0 the arm points straight up: the end effector is 1.26 m above the floor
+    // (shoulder 0.25, then 0.40 + 0.35 + 0.10 + 0.10 + 0.06), over the base
+    mi.set_joint_positions(robot.joint_names, VectorXd::Zero(6));
+    const VectorXd p = mi.get_site_pose(robot.end_effector_sites.at(0)).translation().vec3();
+    CHECK_NEAR(p(0), 0.0);
+    CHECK_NEAR(p(1), 0.0);
+    CHECK_NEAR(p(2), 1.26);
+}
+
+static void generic_manipulator_kinematics()
+{
+    // The DQ Robotics model must agree with the MuJoCo model: fkm(q) is the pose of the
+    // end_effector site, for q in the order of joint_names
+    const DQ_MujocoRobotDescription robot = GenericManipulatorRobot::description();
+    DQ_SerialManipulatorDH arm = GenericManipulatorRobot::kinematics();
+    CHECK(arm.get_dim_configuration_space() == static_cast<int>(robot.joint_names.size()));
+
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(robot.model);
+    const std::string& effector = robot.end_effector_sites.at(0);
+
+    // x and -x are the same pose
+    auto same_pose_error = [](const DQ& a, const DQ& b)
+    {
+        return std::min(vec8(a - b).norm(), vec8(a + b).norm());
+    };
+
+    // q = 0 (arm straight up) and the home keyframe
+    mi.set_joint_positions(robot.joint_names, VectorXd::Zero(6));
+    CHECK(same_pose_error(arm.fkm(VectorXd::Zero(6)), mi.get_site_pose(effector)) < 1e-9);
+    mi.reset_simulation(robot.home_keyframe);
+    const VectorXd q_home = mi.get_joint_positions(robot.joint_names);
+    CHECK(same_pose_error(arm.fkm(q_home), mi.get_site_pose(effector)) < 1e-9);
+
+    // Random configurations within the joint limits
+    std::mt19937 generator(42);
+    const VectorXd q_min = arm.get_lower_q_limit();
+    const VectorXd q_max = arm.get_upper_q_limit();
+    for (int k = 0; k < 50; k++)
+    {
+        VectorXd q(6);
+        for (int i = 0; i < 6; i++)
+            q(i) = std::uniform_real_distribution<double>(q_min(i), q_max(i))(generator);
+        mi.set_joint_positions(robot.joint_names, q);
+        CHECK(same_pose_error(arm.fkm(q), mi.get_site_pose(effector)) < 1e-9);
+    }
+}
+
+static void generic_quadruped_kinematics()
+{
+    // The DQ Robotics legs must agree with the MuJoCo model: x_trunk * legs[i].fkm(q_leg) is the
+    // pose of foot i, for any trunk pose and leg configuration
+    const DQ_MujocoRobotDescription robot = GenericQuadrupedRobot::description();
+    std::vector<DQ_SerialManipulatorDH> legs = GenericQuadrupedRobot::kinematics();
+    CHECK(legs.size() == robot.end_effector_sites.size());
+
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(robot.model);
+
+    // x and -x are the same pose
+    auto same_pose_error = [](const DQ& a, const DQ& b)
+    {
+        return std::min(vec8(a - b).norm(), vec8(a + b).norm());
+    };
+
+    // At q = 0, with the trunk at the origin, the feet hang 0.30 m below the hips
+    mi.set_base_pose(robot.floating_base, DQ(1));
+    mi.set_joint_positions(robot.joint_names, VectorXd::Zero(8));
+    for (std::size_t i = 0; i < legs.size(); i++)
+    {
+        const VectorXd p = legs.at(i).fkm(VectorXd::Zero(2)).translation().vec3();
+        CHECK_NEAR(std::abs(p(0)), 0.17);
+        CHECK_NEAR(std::abs(p(1)), 0.13);
+        CHECK_NEAR(p(2), -0.30);
+        CHECK(same_pose_error(legs.at(i).fkm(VectorXd::Zero(2)), mi.get_site_pose(robot.end_effector_sites.at(i))) < 1e-9);
+    }
+
+    // Random trunk poses and leg configurations within the joint limits
+    std::mt19937 generator(7);
+    std::uniform_real_distribution<double> uniform(-1.0, 1.0);
+    for (int k = 0; k < 30; k++)
+    {
+        const DQ axis = (uniform(generator)*i_ + uniform(generator)*j_ + uniform(generator)*k_).normalize();
+        const double angle = M_PI*uniform(generator);
+        const DQ r = cos(angle/2) + axis*sin(angle/2);
+        const DQ x_trunk = r + 0.5*E_*(uniform(generator)*i_ + uniform(generator)*j_ + (1 + uniform(generator))*k_)*r;
+        mi.set_base_pose(robot.floating_base, x_trunk);
+
+        VectorXd q(8);
+        for (std::size_t i = 0; i < legs.size(); i++)
+            for (int j = 0; j < 2; j++)
+                q(2*i + j) = std::uniform_real_distribution<double>(legs.at(i).get_lower_q_limit()(j),
+                                                                    legs.at(i).get_upper_q_limit()(j))(generator);
+        mi.set_joint_positions(robot.joint_names, q);
+
+        for (std::size_t i = 0; i < legs.size(); i++)
+        {
+            const VectorXd q_leg = q.segment(2*i, 2);
+            const DQ x_foot = mi.get_site_pose(robot.end_effector_sites.at(i));
+            CHECK(same_pose_error(x_trunk*legs.at(i).fkm(q_leg), x_foot) < 1e-9);
+
+            // The world-frame Jacobian of the documentation equals the one of a leg whose reference
+            // frame (the frame fkm() and pose_jacobian() use) is moved to the world
+            DQ_SerialManipulatorDH leg_in_world = legs.at(i);
+            leg_in_world.set_reference_frame(x_trunk*legs.at(i).get_reference_frame());
+            CHECK(same_pose_error(leg_in_world.fkm(q_leg), x_foot) < 1e-9);
+            CHECK((hamiplus8(x_trunk)*legs.at(i).pose_jacobian(q_leg) - leg_in_world.pose_jacobian(q_leg)).norm() < 1e-9);
+        }
+    }
+}
+
 static void camera_tracking()
 {
     // Windowed, so that the tracking camera is actually used by the renderer
@@ -693,6 +828,9 @@ int main(int argc, char** argv)
         {"load_model_from_memory_errors", load_model_from_memory_errors},
         {"embedded_model_with_assets", embedded_model_with_assets},
         {"generic_quadruped_description", generic_quadruped_description},
+        {"generic_manipulator_description", generic_manipulator_description},
+        {"generic_manipulator_kinematics", generic_manipulator_kinematics},
+        {"generic_quadruped_kinematics", generic_quadruped_kinematics},
     };
 
     std::vector<std::string> selected;
