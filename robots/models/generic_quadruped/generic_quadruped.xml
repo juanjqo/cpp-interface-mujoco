@@ -1,0 +1,139 @@
+<mujoco model="generic quadruped">
+  <!--
+    A generic quadruped built only from primitive shapes (no mesh files). Part of the robots
+    library: load it with GenericQuadrupedRobot::description() (see GenericQuadrupedRobot.h).
+
+    The trunk is a floating base: a body with a free joint, accessed with get_base_pose(),
+    get_base_twist(), etc. Each leg has two joints, both about the y axis:
+      <leg>_hip   at a corner of the trunk
+      <leg>_knee  0.15 below the hip
+    with <leg> = FL, FR, RL, RR (front/rear, left/right). The <leg>_foot site is at the center of
+    the foot, 0.15 below the knee. At hip = 0.6 and knee = -1.2 the feet are right below the hips,
+    0.25 m down.
+
+    The "home" keyframe stands the robot on the floor, and its ctrl makes the position
+    actuators hold that pose.
+  -->
+  <compiler angle="radian" autolimits="true"/>
+
+  <option timestep="0.002" integrator="implicitfast"/>
+
+  <statistic center="0 0 0.25" extent="1.0"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="150" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
+             markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+    <material name="trunk" rgba="0.25 0.25 0.28 1"/>
+    <material name="link" rgba="0.85 0.85 0.88 1"/>
+    <material name="joint" rgba="0.15 0.45 0.80 1"/>
+  </asset>
+
+  <default>
+    <default class="leg">
+      <joint axis="0 1 0" damping="0.2" armature="0.01"/>
+      <geom type="capsule" size="0.018" material="link"/>
+      <position kp="60" kv="2" forcerange="-20 20"/>
+      <default class="hip">
+        <joint range="-1.5 1.5"/>
+      </default>
+      <default class="knee">
+        <joint range="-2.6 -0.2"/>
+      </default>
+      <default class="foot">
+        <geom type="sphere" size="0.022" material="joint" friction="1.0"/>
+      </default>
+      <default class="joint_housing">
+        <geom type="cylinder" size="0.03 0.025" material="joint" zaxis="0 1 0"/>
+      </default>
+    </default>
+  </default>
+
+  <worldbody>
+    <light pos="0 0 2.5" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+
+    <body name="trunk" pos="0 0 0.3">
+      <freejoint/>
+      <geom type="box" size="0.2 0.1 0.04" material="trunk"/>
+      <site name="imu" size="0.01"/>
+
+      <body name="FL_thigh" pos="0.17 0.13 0" childclass="leg">
+        <joint name="FL_hip" class="hip"/>
+        <geom class="joint_housing"/>
+        <geom fromto="0 0 0 0 0 -0.15"/>
+        <body name="FL_calf" pos="0 0 -0.15">
+          <joint name="FL_knee" class="knee"/>
+          <geom class="joint_housing" size="0.025 0.02"/>
+          <geom fromto="0 0 0 0 0 -0.15"/>
+          <geom class="foot" pos="0 0 -0.15"/>
+          <site name="FL_foot" pos="0 0 -0.15" size="0.01"/>
+        </body>
+      </body>
+
+      <body name="FR_thigh" pos="0.17 -0.13 0" childclass="leg">
+        <joint name="FR_hip" class="hip"/>
+        <geom class="joint_housing"/>
+        <geom fromto="0 0 0 0 0 -0.15"/>
+        <body name="FR_calf" pos="0 0 -0.15">
+          <joint name="FR_knee" class="knee"/>
+          <geom class="joint_housing" size="0.025 0.02"/>
+          <geom fromto="0 0 0 0 0 -0.15"/>
+          <geom class="foot" pos="0 0 -0.15"/>
+          <site name="FR_foot" pos="0 0 -0.15" size="0.01"/>
+        </body>
+      </body>
+
+      <body name="RL_thigh" pos="-0.17 0.13 0" childclass="leg">
+        <joint name="RL_hip" class="hip"/>
+        <geom class="joint_housing"/>
+        <geom fromto="0 0 0 0 0 -0.15"/>
+        <body name="RL_calf" pos="0 0 -0.15">
+          <joint name="RL_knee" class="knee"/>
+          <geom class="joint_housing" size="0.025 0.02"/>
+          <geom fromto="0 0 0 0 0 -0.15"/>
+          <geom class="foot" pos="0 0 -0.15"/>
+          <site name="RL_foot" pos="0 0 -0.15" size="0.01"/>
+        </body>
+      </body>
+
+      <body name="RR_thigh" pos="-0.17 -0.13 0" childclass="leg">
+        <joint name="RR_hip" class="hip"/>
+        <geom class="joint_housing"/>
+        <geom fromto="0 0 0 0 0 -0.15"/>
+        <body name="RR_calf" pos="0 0 -0.15">
+          <joint name="RR_knee" class="knee"/>
+          <geom class="joint_housing" size="0.025 0.02"/>
+          <geom fromto="0 0 0 0 0 -0.15"/>
+          <geom class="foot" pos="0 0 -0.15"/>
+          <site name="RR_foot" pos="0 0 -0.15" size="0.01"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <position name="FL_hip"  joint="FL_hip"  class="leg"/>
+    <position name="FL_knee" joint="FL_knee" class="leg"/>
+    <position name="FR_hip"  joint="FR_hip"  class="leg"/>
+    <position name="FR_knee" joint="FR_knee" class="leg"/>
+    <position name="RL_hip"  joint="RL_hip"  class="leg"/>
+    <position name="RL_knee" joint="RL_knee" class="leg"/>
+    <position name="RR_hip"  joint="RR_hip"  class="leg"/>
+    <position name="RR_knee" joint="RR_knee" class="leg"/>
+  </actuator>
+
+  <keyframe>
+    <!-- trunk height = 0.247 (legs) + 0.022 (foot radius) -->
+    <key name="home"
+         qpos="0 0 0.27  1 0 0 0  0.6 -1.2  0.6 -1.2  0.6 -1.2  0.6 -1.2"
+         ctrl="0.6 -1.2  0.6 -1.2  0.6 -1.2  0.6 -1.2"/>
+  </keyframe>
+</mujoco>

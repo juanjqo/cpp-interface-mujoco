@@ -4,6 +4,7 @@
 #   1. Configure (Release is the default; /usr/local is the default install prefix)
 #        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
 #      To build only the library, add: -DDQ_MUJOCO_BUILD_EXAMPLES=OFF -DDQ_MUJOCO_BUILD_TESTS=OFF
+#      To skip the robots library (embedded robot models), add: -DDQ_MUJOCO_BUILD_ROBOTS=OFF
 #
 #   2. Build the library, examples and tests
 #        cmake --build build -j$(nproc)
@@ -21,6 +22,8 @@
 # Then, in another CMake project:
 #   find_package(dqrobotics-interface-mujoco REQUIRED)
 #   target_link_libraries(my_app PRIVATE dqrobotics_extensions::interface-mujoco)
+# and, to use the robot models (e.g., GenericQuadrupedRobot::description()):
+#   target_link_libraries(my_app PRIVATE dqrobotics_extensions::interface-mujoco-robots)
 #---------------------------------------------------------------------------------------------------
 
 cmake_minimum_required(VERSION 3.22...3.28)
@@ -52,6 +55,7 @@ endif()
 
 option(DQ_MUJOCO_BUILD_EXAMPLES "Build the examples" ${PROJECT_IS_TOP_LEVEL})
 option(DQ_MUJOCO_BUILD_TESTS "Build the tests" ${PROJECT_IS_TOP_LEVEL})
+option(DQ_MUJOCO_BUILD_ROBOTS "Build the robots library (robot models embedded in the library)" ON)
 
 include(dependencies.cmake)
 include(GNUInstallDirs)
@@ -101,6 +105,12 @@ install(TARGETS ${PROJECT_NAME}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+# Robots library: dqrobotics_extensions::interface-mujoco-robots (same export set)
+if(DQ_MUJOCO_BUILD_ROBOTS)
+    add_subdirectory(robots)
+endif()
+
 install(EXPORT ${PROJECT_NAME}Targets
     NAMESPACE dqrobotics_extensions::
     DESTINATION ${CONFIG_INSTALL_DIR}

@@ -9,15 +9,20 @@ DQ Robotics can drive a MuJoCo simulation using joint names and dual-quaternion 
 
 ## Features
 
-- Load an MJCF (XML) model and render it in a GLFW window (mouse orbit/pan/zoom, FPS and simulation-time overlay)
+- Load an MJCF (XML) model from a file or from memory, and render it in a GLFW window (mouse orbit/pan/zoom, FPS and
+  simulation-time overlay)
 - Joint space: read positions, velocities and actuator forces; teleport joints; command position, velocity or
   torque actuators
-- Task space: get and set the pose of any site as a unit dual quaternion
+- Task space: get and set the pose of any site, and get the pose of any body, as a unit dual quaternion
+- Floating-base robots (humanoids, quadrupeds): get and set the pose and twist of the base, reset to a keyframe, and
+  make the camera follow the robot
 - Reference frames: draw named frames at runtime from dual quaternion poses, without editing the XML model
 - Visualization toggles: wireframe, joint axes, contact forces, center of mass, site frames
-- Simulation reset
+- Simulation reset, to the initial configuration or to a keyframe of the model
 - Headless mode (no window) for automated tests, CI and batch experiments
-- CMake package: `find_package(dqrobotics-interface-mujoco)` and the target `dqrobotics_extensions::interface-mujoco`
+- Robots library: robot models embedded in the library, loaded by including a header (no model files needed)
+- CMake package: `find_package(dqrobotics-interface-mujoco)` and the targets `dqrobotics_extensions::interface-mujoco`
+  and `dqrobotics_extensions::interface-mujoco-robots`
 
 ## Install
 
@@ -67,6 +72,7 @@ cd ~/git/cpp-interface-mujoco
 # 1. Configure: choose Release, and (optionally) where to install it.
 #    Omit -DCMAKE_INSTALL_PREFIX to use the system default (/usr/local on Linux).
 #    To build only the library, add -DDQ_MUJOCO_BUILD_EXAMPLES=OFF -DDQ_MUJOCO_BUILD_TESTS=OFF
+#    To skip the robots library (embedded robot models), add -DDQ_MUJOCO_BUILD_ROBOTS=OFF
 cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/usr/local
@@ -87,6 +93,7 @@ sudo ldconfig
 ```shell
 # 1. Configure: choose Release, and install to your own prefix instead of a system path.
 #    To build only the library, add -DDQ_MUJOCO_BUILD_EXAMPLES=OFF -DDQ_MUJOCO_BUILD_TESTS=OFF
+#    To skip the robots library (embedded robot models), add -DDQ_MUJOCO_BUILD_ROBOTS=OFF
 cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=$HOME/opt
@@ -121,6 +128,8 @@ cd ~/git/cpp-interface-mujoco/build/examples
 ./joint_control
 ./site_poses
 ./reference_frames
+./floating_base
+./twist_open_loop
 ```
 
 | Example | What it shows |
@@ -128,9 +137,13 @@ cd ~/git/cpp-interface-mujoco/build/examples
 | [`joint_control`](examples/joint_control.cpp) | Sinusoidal joint references tracked by position actuators; prints joint positions, velocities and torques |
 | [`site_poses`](examples/site_poses.cpp) | Moves a free-standing `target` frame with `set_site_pose` and reads the `end_effector` frame with `get_site_pose` |
 | [`reference_frames`](examples/reference_frames.cpp) | Draws desired, measured and fixed reference frames, plus a trail of past poses created and removed on the fly |
+| [`floating_base`](examples/floating_base.cpp) | A quadruped starts from its `home` keyframe, rocks its trunk with the leg actuators and gets pushed with `set_base_twist`; the camera follows it |
+| [`twist_open_loop`](examples/twist_open_loop.cpp) | Commands a floating box with constant twists (no feedback) in `WORLD_FRAME` and `BODY_FRAME`: rise, orbit the world z axis, spin in place, drive in a circle, descend |
 
-The examples use [`examples/models/manipulator.xml`](examples/models/manipulator.xml), a generic 6-DoF arm built from
-primitive shapes (no mesh files), which is copied next to the executables at build time.
+The first three examples use `GenericManipulatorRobot`, a generic 6-DoF arm, and `floating_base` uses
+`GenericQuadrupedRobot`, both from the [robots library](#robots-library), so they need no model files.
+`twist_open_loop` uses [`examples/models/floating_box.xml`](examples/models/floating_box.xml), a box with gravity
+compensation, which is copied next to the executables at build time.
 
 ## Tests
 
@@ -139,7 +152,7 @@ cd ~/git/cpp-interface-mujoco
 ctest --test-dir build --output-on-failure
 ```
 
-Most tests run in headless mode. The two that check the window need a display; on a headless machine, run
+Most tests run in headless mode. The ones that check the window need a display; on a headless machine, run
 `xvfb-run -a -s "-screen 0 1280x1024x24" ctest --test-dir build --output-on-failure`, as the
 [CI workflow](.github/workflows/ci.yml) does. If valgrind is installed, an extra test checks the destructor for reads
 of uninitialized memory.
@@ -149,10 +162,13 @@ of uninitialized memory.
 ```cmake
 find_package(dqrobotics-interface-mujoco REQUIRED)
 target_link_libraries(${YOUR_LIBRARY} PRIVATE dqrobotics_extensions::interface-mujoco)
+# for the robot models (GenericManipulatorRobot below); it also links the interface
+target_link_libraries(${YOUR_LIBRARY} PRIVATE dqrobotics_extensions::interface-mujoco-robots)
 ```
 
 ```cpp
 #include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h>
+#include <dqrobotics_extensions/interfaces/mujoco/robots/GenericManipulatorRobot.h>
 
 using namespace DQ_robotics;             // DQ, i_, j_, k_, E_, ...
 using namespace DQ_robotics_extensions;  // DQ_MujocoInterface
@@ -160,13 +176,14 @@ using namespace Eigen;
 
 int main()
 {
-    DQ_MujocoInterface mi;
-    mi.load_model("manipulator.xml");
+    const DQ_MujocoRobotDescription robot = GenericManipulatorRobot::description();
 
-    std::vector<std::string> joints = mi.get_joint_names();
-    VectorXd q_home(6);
-    q_home << 0.0, 0.5, 1.2, 0.0, 1.0, 0.0;
-    mi.set_joint_positions(joints, q_home);  // initial configuration (teleport)
+    DQ_MujocoInterface mi;
+    mi.load_model(robot.model);  // or, for your own model file: mi.load_model("my_robot.xml")
+
+    const std::vector<std::string>& joints = robot.joint_names;
+    mi.reset_simulation(robot.home_keyframe);  // initial configuration from a keyframe
+    const VectorXd q_home = mi.get_joint_positions(joints);
 
     while (!mi.should_close_window())
     {
@@ -180,7 +197,7 @@ int main()
             mi.trigger_next_simulation_step();
         }
 
-        DQ x = mi.get_site_pose("end_effector");  // pose of a site as a unit dual quaternion
+        DQ x = mi.get_site_pose(robot.end_effector_sites.at(0));  // site pose as a unit dual quaternion
         mi.render();
     }
 }
@@ -216,7 +233,8 @@ for initialization and resets, not for control.
 `get_site_pose` and `set_site_pose` work with [sites](https://mujoco.readthedocs.io/en/stable/XMLreference.html#body-site),
 which are frames with no physics. They are useful as end-effector frames or as visual targets. `set_site_pose` stores
 the pose relative to the site's parent body: a site in the `worldbody` stays fixed in the world, and a site on a robot
-link moves with that link. The example manipulator has both kinds:
+link moves with that link. The generic manipulator of the robots library
+([`generic_manipulator.xml`](robots/models/generic_manipulator/generic_manipulator.xml)) has both kinds:
 
 ```xml
 <worldbody>
@@ -229,6 +247,148 @@ link moves with that link. The example manipulator has both kinds:
 ```
 
 Site frames are drawn in the viewer by default; hide them with `set_site_frame_view(false)`.
+
+### Floating-base robots
+
+Humanoids, quadrupeds and free objects have a floating base: a body with a [free joint](https://mujoco.readthedocs.io/en/stable/XMLreference.html#body-freejoint).
+A free joint has 7 positions and 6 velocities, so it is not handled by the joint methods (they throw if you pass it).
+Instead, address the base by the name of its body, which also works for unnamed free joints (`<freejoint/>`, as in most
+[MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie) robots):
+
+```cpp
+mi.load_model(GenericQuadrupedRobot::description().model);  // see the robots library below
+mi.reset_simulation("home");        // most legged robots need a standing keyframe to start
+mi.set_camera_tracking("trunk");    // keep the robot in view
+
+std::vector<std::string> bases = mi.get_floating_base_names();  // {"trunk"}
+std::vector<std::string> joints = mi.get_joint_names(true);     // only the hinge/slide joints of the limbs
+
+DQ x_base = mi.get_base_pose("trunk");     // pose of the base in the world
+DQ xi_base = mi.get_base_twist("trunk");   // twist of the base in the world frame
+VectorXd q = mi.get_joint_positions(joints);
+DQ x_foot = mi.get_body_pose("FL_calf");   // any body, e.g., a foot or a hand
+```
+
+`x_base` and `q` are the full configuration of the robot: for instance, use `x_base` as the reference frame of the
+`DQ_SerialManipulator` of each leg.
+
+`set_base_pose` and `set_base_twist` write the state directly, like `set_joint_positions`. For a robot that moves
+through its own actuators and contacts (a legged robot), use them only for initialization, resets or disturbances.
+A body without dynamics of its own (e.g., a free-flying object with gravity compensation) can be commanded with a
+twist in every step, as in the [`twist_open_loop`](examples/twist_open_loop.cpp) example.
+
+#### Reference frame of the twist
+
+`get_base_twist` and `set_base_twist` take an optional `DQ_MujocoInterface::REFERENCE_FRAME` that sets the frame of
+the twist. Let `x = r + 0.5*E_*p*r` be the pose of the body, `w` its angular velocity and `p_dot` the linear velocity of
+its origin `p`:
+
+| `reference_frame` | Twist | Primary part | Dual part | Kinematics |
+|---|---|---|---|---|
+| `WORLD_FRAME` (default) | `xi = w + E_*(p_dot + cross(p, w))` | Angular velocity, in the world frame | Linear velocity of the point of the body (extended as a rigid body) that is at the **world origin**, in the world frame | `x_dot = 0.5*xi*x` |
+| `BODY_FRAME` | `xi_body = Ad(conj(x), xi)` | Angular velocity, in the body frame | Linear velocity of the **body origin**, in the body frame | `x_dot = 0.5*x*xi_body` |
+
+In the world frame the dual part is **not** the velocity `p_dot` of the body origin, unless `w = 0` or `p = 0`.
+Converting between velocities and twists:
+
+```cpp
+using RF = DQ_MujocoInterface::REFERENCE_FRAME;
+const DQ x = mi.get_base_pose("box");
+const DQ p = x.translation();
+
+// velocities -> twist
+mi.set_base_twist("box", w + E_*(p_dot + cross(p, w)));                  // w, p_dot in the world frame
+mi.set_base_twist("box", w_body + E_*p_dot_body, RF::BODY_FRAME);        // w_body, p_dot_body in the body frame
+
+// twist -> velocities
+const DQ xi = mi.get_base_twist("box");                                  // same as RF::WORLD_FRAME
+const DQ w_measured = xi.P();
+const DQ p_dot_measured = xi.D() - cross(p, w_measured);
+
+const DQ xi_body = mi.get_base_twist("box", RF::BODY_FRAME);             // equals Ad(conj(x), xi)
+const DQ w_body_measured = xi_body.P();
+const DQ p_dot_body_measured = xi_body.D();
+```
+
+In the world frame, the `cross(p, w)` term matters: `set_base_twist("box", w)` rotates the box about the world
+origin, so its origin moves on a circle. To spin it in place, use `w + E_*cross(p, w)`, or `w_body` alone in
+`BODY_FRAME`.
+
+MuJoCo stores the velocity of a free joint (`qvel`) in a third, mixed form: the linear velocity of the body origin in
+the world frame, followed by the angular velocity in the body frame. The interface converts it, so you never need to
+handle `qvel` directly.
+
+### Robots library
+
+The robots library holds robot models embedded in the library: you load a robot by including its header, with no
+model files to ship or find at runtime. Each robot provides a `DQ_MujocoRobotDescription`, with the model and the
+names needed to use it, so that they are not hardcoded:
+
+```cmake
+target_link_libraries(${YOUR_LIBRARY} PRIVATE dqrobotics_extensions::interface-mujoco-robots)
+```
+
+```cpp
+#include <dqrobotics_extensions/interfaces/mujoco/robots/GenericQuadrupedRobot.h>
+
+const DQ_MujocoRobotDescription robot = GenericQuadrupedRobot::description();
+mi.load_model(robot.model);                                     // from memory
+mi.reset_simulation(robot.home_keyframe);                       // "home"
+VectorXd q = mi.get_joint_positions(robot.joint_names);         // FL_hip, FL_knee, ...
+DQ x_base = mi.get_base_pose(robot.floating_base);              // "trunk"
+DQ x_foot = mi.get_site_pose(robot.end_effector_sites.at(0));   // "FL_foot"
+```
+
+| Robot | Header | Description |
+|---|---|---|
+| `GenericManipulatorRobot` | [`GenericManipulatorRobot.h`](robots/include/dqrobotics_extensions/interfaces/mujoco/robots/GenericManipulatorRobot.h) | 6-DoF arm built from primitive shapes, with position actuators; fixed base, end effector `end_effector`, keyframe `home`. Also has a free-standing `target` site in the world. `kinematics()` returns its `DQ_SerialManipulatorDH` |
+| `GenericQuadrupedRobot` | [`GenericQuadrupedRobot.h`](robots/include/dqrobotics_extensions/interfaces/mujoco/robots/GenericQuadrupedRobot.h) | Quadruped with 2 joints per leg, built from primitive shapes; floating base `trunk`, feet `FL_foot`, `FR_foot`, `RL_foot`, `RR_foot`, keyframe `home`. `kinematics()` returns one `DQ_SerialManipulatorDH` per leg, in the trunk frame |
+
+Robots can also provide their DQ Robotics kinematic model, which matches the MuJoCo model (a test checks that
+`fkm(q)` equals the pose of the end-effector site), so a controller and the simulation share the same geometry:
+
+```cpp
+DQ_SerialManipulatorDH arm = GenericManipulatorRobot::kinematics();
+VectorXd q = mi.get_joint_positions(robot.joint_names);  // same joint order
+DQ x = arm.fkm(q);                                       // = mi.get_site_pose("end_effector")
+MatrixXd J = arm.pose_jacobian(q);
+```
+
+For a floating-base robot, the limbs are expressed in the frame of the floating base, so the world pose is the base
+pose times the limb pose. `GenericQuadrupedRobot::kinematics()` returns the legs in the order of
+`end_effector_sites` (FL, FR, RL, RR); leg `i` has the joints `joint_names[2i]` (hip) and `joint_names[2i+1]` (knee):
+
+```cpp
+std::vector<DQ_SerialManipulatorDH> legs = GenericQuadrupedRobot::kinematics();
+const DQ x_trunk = mi.get_base_pose(robot.floating_base);
+const VectorXd q_FL = mi.get_joint_positions({robot.joint_names.at(0), robot.joint_names.at(1)});
+
+DQ x_foot = x_trunk*legs.at(0).fkm(q_FL);                       // = mi.get_site_pose("FL_foot")
+MatrixXd J_foot = hamiplus8(x_trunk)*legs.at(0).pose_jacobian(q_FL);  // world frame, w.r.t. q_FL
+```
+
+The models live in [`robots/models`](robots/models). At build time, `dq_mujoco_embed_model()`
+([`cmake/DQMujocoEmbedModel.cmake`](cmake/DQMujocoEmbedModel.cmake)) turns each model directory (the XML and its
+meshes, textures and `<include>` files) into a C++ function that returns a `DQ_MujocoModel`. Steps to add a robot are
+in [`robots/CMakeLists.txt`](robots/CMakeLists.txt). Configure with `-DDQ_MUJOCO_BUILD_ROBOTS=OFF` to skip the library.
+
+### Models in memory
+
+`load_model` also accepts a `DQ_MujocoModel`: the XML text plus the files it refers to, keyed by their path relative
+to the XML as MuJoCo resolves it (including `<compiler meshdir>`). Nothing is read from disk, so models can also be
+generated or modified at runtime:
+
+```cpp
+DQ_MujocoModel model;
+model.name = "robot.xml";
+model.xml = R"(<mujoco>
+                 <compiler meshdir="meshes"/>
+                 <asset><mesh file="link.obj"/></asset>
+                 ...
+               </mujoco>)";
+model.assets["meshes/link.obj"] = link_obj_bytes;  // std::vector<unsigned char>
+mi.load_model(model);
+```
 
 ### Reference frames
 
@@ -261,19 +421,30 @@ but not drawn.
 |---|---|
 | `DQ_MujocoInterface(rendering, title, width, height)` | All arguments are optional (default: a 1280x920 window titled with the model name) |
 | `load_model(xml)` | Load an MJCF file and open the viewer window (unless headless). Can be called again to switch models |
+| `load_model(model)` | Same, from a `DQ_MujocoModel` held in memory (e.g., `GenericQuadrupedRobot::description().model`) |
 | `trigger_next_simulation_step()` | Advance the simulation by one timestep (`mj_step`) |
 | `get_simulation_time()` | Simulation time in seconds |
 | `render()` / `should_close_window()` | Draw a frame and process window events / check whether the window was closed (no-op / `false` when headless) |
-| `reset_simulation()` | Reset the state to the model's initial configuration |
-| `get_joint_names()` | Names of all joints in the model |
+| `reset_simulation()` / `reset_simulation(keyframe)` | Reset the state to the model's initial configuration or to a keyframe |
+| `get_joint_names(only_single_dof)` | Names of all joints in the model, or only of the named hinge and slide joints |
 | `get_joint_positions/velocities/forces(names)` | Joint state and actuator forces (`qfrc_actuator`) |
 | `set_joint_positions(names, q)` | Teleport joints (no dynamics) |
 | `set_joint_target_positions/velocities/forces(names, u)` | Actuator commands |
 | `get_site_pose(name)` / `set_site_pose(name, x)` | Site pose as a unit dual quaternion |
+| `get_body_pose(name)` | Body pose as a unit dual quaternion |
+| `get_floating_base_names()` | Bodies with a free joint |
+| `get_base_pose(body)` / `set_base_pose(body, x)` | Floating-base pose as a unit dual quaternion (set: teleport) |
+| `get_base_twist(body, frame)` / `set_base_twist(body, xi, frame)` | Floating-base twist in `WORLD_FRAME` (default, reference point at the world origin) or `BODY_FRAME` (reference point at the body origin) (set: teleport) |
+| `set_camera_tracking(body)` | Make the camera follow a body (empty name: free camera) |
 | `add_reference_frame(name, length, width, opacity, label)` / `remove_reference_frame(name)` | Create or remove a frame that is only drawn (no XML needed) |
 | `set_reference_frame_pose(name, x)` / `get_reference_frame_pose(name)` | Pose of a reference frame as a unit dual quaternion |
 | `set_wireframe_view`, `set_joint_view`, `set_contact_view`, `set_center_of_mass_view`, `set_site_frame_view` | Visualization toggles |
 
 ## License
 
-[LGPL-3.0-or-later](LICENSE), like [DQ Robotics](https://github.com/dqrobotics/cpp).
+Copyright (C) 2025-2026 Juan Jose Quiroz Omana. Licensed under the [LGPL-3.0-or-later](LICENSE).
+
+This project uses [DQ Robotics](https://github.com/dqrobotics/cpp) (LGPL-3.0-or-later) but is not part of the DQ
+Robotics project. It also uses [MuJoCo](https://github.com/google-deepmind/mujoco) (Apache-2.0), which is downloaded at
+build time and installed with the library; the mouse and scroll handling of the viewer is adapted from MuJoCo's
+`sample/basic.cc`.

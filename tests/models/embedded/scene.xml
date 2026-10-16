@@ -1,0 +1,13 @@
+<mujoco model="embedded scene">
+  <!--
+    Embedded into the tests with dq_mujoco_embed_model (see tests/CMakeLists.txt), to check that
+    <include> files, meshes under meshdir and binary files are found in memory.
+  -->
+  <compiler meshdir="meshes"/>
+  <asset>
+    <mesh name="tetra" file="tetra.obj"/>
+  </asset>
+  <worldbody>
+    <include file="parts/arm.xml"/>
+  </worldbody>
+</mujoco>

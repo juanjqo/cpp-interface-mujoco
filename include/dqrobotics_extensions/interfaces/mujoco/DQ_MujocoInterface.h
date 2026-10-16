@@ -1,32 +1,16 @@
 /**
-(C) Copyright 2011-2025 DQ Robotics Developers
+SPDX-License-Identifier: LGPL-3.0-or-later
+Copyright (C) 2025-2026 Juan Jose Quiroz Omana
 
-This file is based on DQ Robotics.
-
-    DQ Robotics is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Lesser General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    DQ Robotics is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Lesser General Public License for more details.
-
-    You should have received a copy of the GNU Lesser General Public License
-    along with DQ Robotics.  If not, see <http://www.gnu.org/licenses/>.
-
-DQ Robotics website: dqrobotics.github.io
-
-Contributors:
-- Juan Jose Quiroz Omana
-       - Responsible for the original implementation.
-
+This file is part of cpp-interface-mujoco, an unofficial interface for C++17 between DQ Robotics
+and MuJoCo: https://github.com/juanjqo/cpp-interface-mujoco
+It uses DQ Robotics (https://dqrobotics.github.io) but is not part of DQ Robotics.
 */
 
 
 #pragma once
 #include <dqrobotics/DQ.h>
+#include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoModel.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -50,6 +34,17 @@ public:
     };
 
     /**
+     * @brief Frame in which a twist is expressed (see get_base_twist() and set_base_twist()).
+     *  WORLD_FRAME: world frame, reference point at the world origin (x_dot = 0.5*xi*x).
+     *  BODY_FRAME:  body frame, reference point at the body origin (x_dot = 0.5*x*xi).
+     */
+    enum class REFERENCE_FRAME
+    {
+        BODY_FRAME,
+        WORLD_FRAME
+    };
+
+    /**
      * @brief DQ_MujocoInterface
      * @param rendering WINDOW (default) or HEADLESS.
      * @param window_title Title of the window. If empty, the name of the model is used.
@@ -64,6 +59,7 @@ public:
     DQ_MujocoInterface& operator= (const DQ_MujocoInterface&) = delete;
 
     void load_model(const std::string& xml_model);
+    void load_model(const DQ_MujocoModel& model);
 
 
     void trigger_next_simulation_step();
@@ -78,14 +74,16 @@ public:
     void set_contact_view(const bool &flag);
     void set_center_of_mass_view(const bool& flag);
     void set_site_frame_view(const bool& flag);
+    void set_camera_tracking(const std::string& bodyname);
 
 
     void reset_simulation();
+    void reset_simulation(const std::string& keyframe);
 
 
 
 
-    std::vector<std::string> get_joint_names() const;
+    std::vector<std::string> get_joint_names(const bool& only_single_dof = false) const;
 
     // Joint space methods
     Eigen::VectorXd get_joint_positions(const std::vector<std::string>& jointnames) const;
@@ -95,6 +93,20 @@ public:
     Eigen::VectorXd get_joint_velocities(const std::vector<std::string>& jointnames) const;
     void            set_joint_target_forces(const std::vector<std::string>& jointnames, const Eigen::VectorXd& forces);
     Eigen::VectorXd get_joint_forces(const std::vector<std::string>& jointnames) const;
+
+    // Floating bases (humanoids, quadrupeds, free objects), addressed by the body that owns the free joint
+    std::vector<std::string> get_floating_base_names() const;
+    DQ_robotics::DQ get_base_pose(const std::string& bodyname) const;
+    void            set_base_pose(const std::string& bodyname, const DQ_robotics::DQ& pose);
+    // WORLD_FRAME: xi = w + E_*(p_dot + cross(p, w)), all in the world frame (x_dot = 0.5*xi*x)
+    // BODY_FRAME:  xi_body = Ad(conj(x), xi), velocities of the body origin in the body frame (x_dot = 0.5*x*xi_body)
+    DQ_robotics::DQ get_base_twist(const std::string& bodyname,
+                                   const REFERENCE_FRAME& reference_frame = REFERENCE_FRAME::WORLD_FRAME) const;
+    void            set_base_twist(const std::string& bodyname,
+                                   const DQ_robotics::DQ& twist,
+                                   const REFERENCE_FRAME& reference_frame = REFERENCE_FRAME::WORLD_FRAME);
+
+    DQ_robotics::DQ get_body_pose(const std::string& bodyname) const;
 
     DQ_robotics::DQ get_site_pose(const std::string& objectname) const;
     void set_site_pose(const std::string& objectname, const DQ_robotics::DQ& pose);

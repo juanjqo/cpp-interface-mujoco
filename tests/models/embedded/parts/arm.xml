@@ -1,0 +1,6 @@
+<mujoco>
+  <body name="arm" pos="0 0 0.5">
+    <joint name="included_hinge" type="hinge" axis="0 0 1"/>
+    <geom type="mesh" mesh="tetra"/>
+  </body>
+</mujoco>

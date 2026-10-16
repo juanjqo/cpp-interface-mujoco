@@ -1,0 +1,31 @@
+<mujoco model="floating base">
+  <!--
+    A floating base with an unnamed free joint (as in most MuJoCo Menagerie robots), a leg on a
+    hinge joint and a tail on a ball joint.
+    No gravity and a small timestep, so that one step of the free motion is close to the
+    first-order prediction x_dot = 0.5*xi*x.
+    qpos layout: base (7: x y z qw qx qy qz), hip (1), tail_ball (4: qw qx qy qz).
+  -->
+  <option gravity="0 0 0" timestep="0.0001"/>
+
+  <worldbody>
+    <body name="base" pos="0 0 1">
+      <freejoint/>
+      <geom type="box" size=".1 .1 .1"/>
+      <body name="leg" pos="0 0 -0.1">
+        <joint name="hip" type="hinge" axis="0 1 0"/>
+        <geom type="capsule" fromto="0 0 0 0 0 -0.3" size="0.02"/>
+        <site name="foot" pos="0 0 -0.3"/>
+      </body>
+      <body name="tail" pos="-0.1 0 0">
+        <joint name="tail_ball" type="ball"/>
+        <geom type="capsule" fromto="0 0 0 -0.2 0 0" size="0.02"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <keyframe>
+    <!-- base at (0.5, -0.2, 2) rotated 90 degrees about z, hip at 0.3 rad -->
+    <key name="home" qpos="0.5 -0.2 2  0.7071067811865476 0 0 0.7071067811865476  0.3  1 0 0 0"/>
+  </keyframe>
+</mujoco>

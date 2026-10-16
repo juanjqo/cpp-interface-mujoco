@@ -1,4 +1,13 @@
 /**
+SPDX-License-Identifier: LGPL-3.0-or-later
+Copyright (C) 2025-2026 Juan Jose Quiroz Omana
+
+This file is part of cpp-interface-mujoco, an unofficial interface for C++17 between DQ Robotics
+and MuJoCo: https://github.com/juanjqo/cpp-interface-mujoco
+It uses DQ Robotics (https://dqrobotics.github.io) but is not part of DQ Robotics.
+*/
+
+/**
 Tests for DQ_MujocoInterface.
 
 Each test is a function registered in tests_. Run all of them with
@@ -8,16 +17,21 @@ or a single one (this is how CTest calls them) with
 
 The tests must run from the directory that contains the test models (CTest does this).
 Most tests run in HEADLESS mode. The ones that check the window (load_model_twice,
-two_interfaces_at_once, reference_frames_more_than_scene_capacity) need a display; on a
-headless machine, use xvfb-run.
+two_interfaces_at_once, reference_frames_more_than_scene_capacity, camera_tracking) need a
+display; on a headless machine, use xvfb-run.
 */
 
 #include "dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h"
+#include "dqrobotics_extensions/interfaces/mujoco/robots/GenericManipulatorRobot.h"
+#include "dqrobotics_extensions/interfaces/mujoco/robots/GenericQuadrupedRobot.h"
 #include <GLFW/glfw3.h>
 #include <cmath>
+#include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <map>
+#include <random>
 
 using namespace DQ_robotics;
 using namespace DQ_robotics_extensions;
@@ -308,6 +322,478 @@ static void two_interfaces_at_once()
     CHECK(!a.should_close_window());
 }
 
+static void base_pose_set_and_get()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("floating_base.xml");
+    const DQ x = test_pose();
+    mi.set_base_pose("base", x);
+    CHECK_NEAR(pose_error(mi.get_base_pose("base"), x), 0.0);
+    // The body frame is updated immediately
+    CHECK_NEAR(pose_error(mi.get_body_pose("base"), x), 0.0);
+    // ...and so are the frames attached to the base: the foot is 0.4 m below the base origin
+    const DQ x_foot = x*(1 + 0.5*E_*(-0.4*k_));
+    CHECK_NEAR(pose_error(mi.get_site_pose("foot").translation(), x_foot.translation()), 0.0);
+
+    // Invalid calls
+    CHECK_THROWS(std::runtime_error, mi.set_base_pose("base", 2.0*x));  // not unit
+    CHECK_THROWS(std::runtime_error, mi.get_base_pose("leg"));          // no free joint
+    CHECK_THROWS(std::runtime_error, mi.get_base_pose("unknown"));
+    CHECK_THROWS(std::runtime_error, mi.get_body_pose("unknown"));
+}
+
+static void base_twist_matches_motion()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("floating_base.xml");
+    // A rotated base away from the origin, so that mixing up the frames of the free joint
+    // velocity (linear: world, angular: body) or forgetting cross(p, w) changes the result
+    const DQ x0 = test_pose();
+    mi.set_base_pose("base", x0);
+    const DQ w = 0.3*i_ - 0.5*j_ + 0.8*k_;
+    const DQ p_dot = 0.2*i_ + 0.1*j_ - 0.4*k_;
+    const DQ xi = w + E_*(p_dot + cross(x0.translation(), w));
+    mi.set_base_twist("base", xi);
+    CHECK_NEAR(vec8(mi.get_base_twist("base") - xi).norm(), 0.0);
+
+    // One step of the free motion must agree with x_dot = 0.5*xi*x (no gravity, small timestep)
+    const double t0 = mi.get_simulation_time();
+    mi.trigger_next_simulation_step();
+    const double dt = mi.get_simulation_time() - t0;
+    const DQ x_dot = (1.0/dt)*(mi.get_base_pose("base") - x0);
+    CHECK(vec8(x_dot - 0.5*xi*x0).norm() < 1e-3);
+
+    CHECK_THROWS(std::runtime_error, mi.set_base_twist("base", 1 + xi));  // not pure
+}
+
+static void base_twist_reference_frames()
+{
+    // Checks the frame conventions stated in the documentation of get/set_base_twist() against
+    // one step of the free motion (no gravity, small timestep)
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("floating_base.xml");
+    const DQ x0 = test_pose();
+    const DQ r0 = x0.P();
+    const DQ p0 = x0.translation();
+    const DQ w = 0.3*i_ - 0.5*j_ + 0.8*k_;
+
+    // xi = w + E_*cross(p, w) spins the body in place: its origin does not move
+    mi.set_base_pose("base", x0);
+    mi.set_base_twist("base", w + E_*cross(p0, w));
+    double t0 = mi.get_simulation_time();
+    mi.trigger_next_simulation_step();
+    double dt = mi.get_simulation_time() - t0;
+    CHECK((mi.get_base_pose("base").translation() - p0).vec3().norm()/dt < 1e-3);
+
+    // xi = w alone rotates the body about the world origin: its origin moves with velocity cross(w, p)
+    mi.set_base_pose("base", x0);
+    mi.set_base_twist("base", w);
+    t0 = mi.get_simulation_time();
+    mi.trigger_next_simulation_step();
+    dt = mi.get_simulation_time() - t0;
+    const DQ p_dot = (1.0/dt)*(mi.get_base_pose("base").translation() - p0);
+    CHECK(vec4(p_dot - cross(w, p0)).norm() < 1e-3);
+
+    // BODY_FRAME: the twist is Ad(conj(x), xi), made of the angular velocity and the velocity of
+    // the body origin, both expressed in the body frame
+    using RF = DQ_MujocoInterface::REFERENCE_FRAME;
+    const DQ v = 0.2*i_ + 0.1*j_ - 0.4*k_;
+    const DQ xi = w + E_*(v + cross(p0, w));
+    mi.set_base_pose("base", x0);
+    mi.set_base_twist("base", xi);
+    const DQ xi_body = mi.get_base_twist("base", RF::BODY_FRAME);
+    CHECK_NEAR(vec8(xi_body - Ad(conj(x0), xi)).norm(), 0.0);
+    t0 = mi.get_simulation_time();
+    mi.trigger_next_simulation_step();
+    dt = mi.get_simulation_time() - t0;
+    const DQ x1 = mi.get_base_pose("base");
+    const DQ w_body = (2.0/dt)*(conj(r0)*x1.P() - 1);   // r1 = r0*(1 + 0.5*w_body*dt)
+    const DQ v_body = (1.0/dt)*(conj(r0)*(x1.translation() - p0)*r0);
+    CHECK(vec4(w_body - xi_body.P()).norm() < 1e-3);
+    CHECK(vec4(v_body - xi_body.D()).norm() < 1e-3);
+
+    // Setting in BODY_FRAME is the inverse, and gives the same motion as the world-frame twist
+    mi.set_base_pose("base", x0);
+    mi.set_base_twist("base", xi_body, RF::BODY_FRAME);
+    CHECK_NEAR(vec8(mi.get_base_twist("base", RF::BODY_FRAME) - xi_body).norm(), 0.0);
+    CHECK_NEAR(vec8(mi.get_base_twist("base", RF::WORLD_FRAME) - xi).norm(), 0.0);
+
+    // In BODY_FRAME, an angular velocity alone spins the body in place
+    mi.set_base_pose("base", x0);
+    mi.set_base_twist("base", w, RF::BODY_FRAME);
+    t0 = mi.get_simulation_time();
+    mi.trigger_next_simulation_step();
+    dt = mi.get_simulation_time() - t0;
+    CHECK((mi.get_base_pose("base").translation() - p0).vec3().norm()/dt < 1e-3);
+
+    CHECK_THROWS(std::runtime_error, mi.set_base_twist("base", 1 + xi, RF::BODY_FRAME));  // not pure
+}
+
+static void base_falls_under_gravity()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("test_scene.xml");
+    // "box" starts at (1, 1, 1) at rest, with nothing below it
+    const int steps = 100;
+    for (int i = 0; i < steps; i++)
+        mi.trigger_next_simulation_step();
+    const double t = mi.get_simulation_time();
+    // No rotation, so the twist is just the linear velocity -g*t (exact for MuJoCo's Euler integrator)
+    CHECK_NEAR(vec8(mi.get_base_twist("box") - E_*(-9.81*t*k_)).norm(), 0.0);
+    VectorXd p = mi.get_base_pose("box").translation().vec3();
+    CHECK_NEAR(p(0), 1.0);
+    CHECK_NEAR(p(1), 1.0);
+    CHECK(std::abs(p(2) - (1.0 - 0.5*9.81*t*t)) < 1e-2);
+}
+
+static void joint_methods_reject_free_and_ball_joints()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("test_scene.xml");
+    CHECK_THROWS(std::invalid_argument, mi.get_joint_positions({"box_free"}));
+    CHECK_THROWS(std::invalid_argument, mi.set_joint_positions({"box_free"}, vec({0.1})));
+    CHECK_THROWS(std::invalid_argument, mi.get_joint_velocities({"box_free"}));
+    CHECK_THROWS(std::invalid_argument, mi.get_joint_forces({"box_free"}));
+    try
+    {
+        mi.get_joint_positions({"box_free"});
+    }
+    catch (const std::invalid_argument& e)
+    {
+        // The message points to the base methods and the body to use
+        CHECK(std::string(e.what()).find("get_base_pose") != std::string::npos);
+        CHECK(std::string(e.what()).find("\"box\"") != std::string::npos);
+    }
+
+    mi.load_model("floating_base.xml");
+    CHECK_THROWS(std::invalid_argument, mi.get_joint_positions({"tail_ball"}));
+    CHECK_THROWS(std::invalid_argument, mi.set_joint_positions({"tail_ball"}, vec({0.1})));
+}
+
+static void joint_and_floating_base_names()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("test_scene.xml");
+    CHECK((mi.get_joint_names() == std::vector<std::string>{"box_free", "hinge", "hinge2"}));
+    CHECK((mi.get_joint_names(true) == std::vector<std::string>{"hinge", "hinge2"}));
+    CHECK(mi.get_floating_base_names() == std::vector<std::string>{"box"});
+
+    // The free joint is unnamed and "tail_ball" has 3 DoFs
+    mi.load_model("floating_base.xml");
+    CHECK(mi.get_joint_names(true) == std::vector<std::string>{"hip"});
+    CHECK(mi.get_floating_base_names() == std::vector<std::string>{"base"});
+
+    mi.load_model("pendulum.xml");
+    CHECK(mi.get_floating_base_names().empty());
+}
+
+static void reset_to_keyframe()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model("floating_base.xml");
+    for (int i = 0; i < 10; i++)
+        mi.trigger_next_simulation_step();
+
+    mi.reset_simulation("home");
+    CHECK_NEAR(mi.get_simulation_time(), 0.0);
+    const DQ r = cos(M_PI/4) + k_*sin(M_PI/4);
+    const DQ x_home = r + 0.5*E_*(0.5*i_ - 0.2*j_ + 2.0*k_)*r;
+    CHECK_NEAR(pose_error(mi.get_base_pose("base"), x_home), 0.0);
+    CHECK_NEAR(pose_error(mi.get_body_pose("base"), x_home), 0.0);
+    CHECK_NEAR(mi.get_joint_positions({"hip"})(0), 0.3);
+
+    // Without a keyframe, the reset goes back to the configuration in the XML
+    mi.reset_simulation();
+    CHECK_NEAR(pose_error(mi.get_base_pose("base"), 1 + 0.5*E_*k_), 0.0);
+    CHECK_NEAR(mi.get_joint_positions({"hip"})(0), 0.0);
+
+    CHECK_THROWS(std::runtime_error, mi.reset_simulation("unknown"));
+}
+
+static std::vector<unsigned char> bytes(const std::string& text)
+{
+    return std::vector<unsigned char>(text.begin(), text.end());
+}
+
+static DQ_MujocoModel in_memory_model()
+{
+    // An <include> file and a mesh under meshdir: both must be found in memory. The tests run in
+    // tests/models, where neither "parts/" nor "meshes/" exist, so nothing can come from disk.
+    DQ_MujocoModel model;
+    model.name = "in_memory.xml";
+    model.xml = R"(<mujoco model="in memory">
+                     <compiler meshdir="meshes"/>
+                     <asset><mesh name="tetra" file="tetra.obj"/></asset>
+                     <worldbody><include file="parts/arm.xml"/></worldbody>
+                   </mujoco>)";
+    model.assets["parts/arm.xml"] = bytes(R"(<mujoco>
+                                               <body name="arm">
+                                                 <joint name="included_hinge" axis="0 0 1"/>
+                                                 <geom type="mesh" mesh="tetra"/>
+                                               </body>
+                                             </mujoco>)");
+    model.assets["meshes/tetra.obj"] = bytes("v 0 0 0\nv 0.1 0 0\nv 0 0.1 0\nv 0 0 0.1\n"
+                                             "f 1 3 2\nf 1 2 4\nf 1 4 3\nf 2 3 4\n");
+    return model;
+}
+
+static void load_model_from_memory()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(in_memory_model());
+    CHECK(mi.get_joint_names() == std::vector<std::string>{"included_hinge"});
+    mi.set_joint_positions({"included_hinge"}, vec({0.4}));
+    mi.trigger_next_simulation_step();
+
+    // Switching between a model in memory and a file works both ways
+    mi.load_model("pendulum.xml");
+    CHECK(mi.get_joint_names() == std::vector<std::string>{"pendulum_joint"});
+    mi.load_model(in_memory_model());
+    CHECK(mi.get_joint_names() == std::vector<std::string>{"included_hinge"});
+}
+
+static void load_model_from_memory_errors()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+
+    DQ_MujocoModel no_name = in_memory_model();
+    no_name.name = "";
+    CHECK_THROWS(std::invalid_argument, mi.load_model(no_name));
+
+    DQ_MujocoModel no_xml = in_memory_model();
+    no_xml.xml = "";
+    CHECK_THROWS(std::invalid_argument, mi.load_model(no_xml));
+
+    DQ_MujocoModel clash = in_memory_model();
+    clash.assets[clash.name] = bytes("<mujoco/>");
+    CHECK_THROWS(std::invalid_argument, mi.load_model(clash));
+
+    // A missing asset is reported with MuJoCo's message, which names the file
+    DQ_MujocoModel missing_mesh = in_memory_model();
+    missing_mesh.assets.erase("meshes/tetra.obj");
+    try
+    {
+        mi.load_model(missing_mesh);
+        throw std::runtime_error("load_model did not throw for a missing asset");
+    }
+    catch (const std::runtime_error& e)
+    {
+        CHECK(std::string(e.what()).find("tetra.obj") != std::string::npos);
+    }
+
+    // A failed load keeps the interface usable
+    mi.load_model(in_memory_model());
+    CHECK(mi.get_joint_names() == std::vector<std::string>{"included_hinge"});
+}
+
+// Generated from tests/models/embedded by dq_mujoco_embed_model (see tests/CMakeLists.txt)
+namespace DQ_robotics_extensions::embedded_models
+{
+DQ_MujocoModel embedded_test_scene();
+}
+
+static void embedded_model_with_assets()
+{
+    const DQ_MujocoModel model = embedded_models::embedded_test_scene();
+    CHECK(model.name == "scene.xml");
+    CHECK(model.assets.size() == 3);
+
+    // Binary files are embedded byte for byte (the blob has every byte value, including 0)
+    std::ifstream file("embedded/data/blob.bin", std::ios::binary);
+    CHECK(file.good());
+    const std::vector<unsigned char> blob((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    CHECK(blob.size() == 512);
+    CHECK(model.assets.at("data/blob.bin") == blob);
+
+    // The include file and the mesh are found in memory
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(model);
+    CHECK(mi.get_joint_names() == std::vector<std::string>{"included_hinge"});
+}
+
+static void generic_quadruped_description()
+{
+    const DQ_MujocoRobotDescription robot = GenericQuadrupedRobot::description();
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(robot.model);
+    mi.reset_simulation(robot.home_keyframe);
+
+    // The names in the description match the model
+    CHECK(mi.get_floating_base_names() == std::vector<std::string>{robot.floating_base});
+    CHECK(mi.get_joint_names(true) == robot.joint_names);
+    for (const auto& site : robot.end_effector_sites)
+        mi.get_site_pose(site);  // throws if the site does not exist
+
+    // The keyframe stands the robot: after 2 s the trunk is still up and level
+    for (int i = 0; i < 1000; i++)
+        mi.trigger_next_simulation_step();
+    const DQ x_base = mi.get_base_pose(robot.floating_base);
+    const double height = x_base.translation().q(3);
+    CHECK(height > 0.2 && height < 0.3);
+    const DQ z_axis = x_base.P()*k_*conj(x_base.P());
+    CHECK(z_axis.q(3) > 0.99);
+    // ...on its four feet
+    for (const auto& site : robot.end_effector_sites)
+        CHECK(std::abs(mi.get_site_pose(site).translation().q(3)) < 0.03);
+}
+
+static void generic_manipulator_description()
+{
+    const DQ_MujocoRobotDescription robot = GenericManipulatorRobot::description();
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(robot.model);
+    mi.reset_simulation(robot.home_keyframe);
+
+    // The names in the description match the model (fixed base: no floating base)
+    CHECK(robot.floating_base.empty());
+    CHECK(mi.get_floating_base_names().empty());
+    CHECK(mi.get_joint_names(true) == robot.joint_names);
+    CHECK(robot.end_effector_sites == std::vector<std::string>{"end_effector"});
+
+    // The keyframe is the documented home configuration, and the actuators hold it. The position
+    // actuators are PD controllers, so gravity leaves a steady offset (about 0.02 rad, mostly at
+    // the shoulder).
+    const VectorXd q_home = vec({0.0, 0.5, 1.2, 0.0, 1.0, 0.0});
+    CHECK_NEAR((mi.get_joint_positions(robot.joint_names) - q_home).norm(), 0.0);
+    for (int i = 0; i < 1000; i++)
+        mi.trigger_next_simulation_step();
+    CHECK((mi.get_joint_positions(robot.joint_names) - q_home).norm() < 0.05);
+
+    // At q = 0 the arm points straight up: the end effector is 1.26 m above the floor
+    // (shoulder 0.25, then 0.40 + 0.35 + 0.10 + 0.10 + 0.06), over the base
+    mi.set_joint_positions(robot.joint_names, VectorXd::Zero(6));
+    const VectorXd p = mi.get_site_pose(robot.end_effector_sites.at(0)).translation().vec3();
+    CHECK_NEAR(p(0), 0.0);
+    CHECK_NEAR(p(1), 0.0);
+    CHECK_NEAR(p(2), 1.26);
+}
+
+static void generic_manipulator_kinematics()
+{
+    // The DQ Robotics model must agree with the MuJoCo model: fkm(q) is the pose of the
+    // end_effector site, for q in the order of joint_names
+    const DQ_MujocoRobotDescription robot = GenericManipulatorRobot::description();
+    DQ_SerialManipulatorDH arm = GenericManipulatorRobot::kinematics();
+    CHECK(arm.get_dim_configuration_space() == static_cast<int>(robot.joint_names.size()));
+
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(robot.model);
+    const std::string& effector = robot.end_effector_sites.at(0);
+
+    // x and -x are the same pose
+    auto same_pose_error = [](const DQ& a, const DQ& b)
+    {
+        return std::min(vec8(a - b).norm(), vec8(a + b).norm());
+    };
+
+    // q = 0 (arm straight up) and the home keyframe
+    mi.set_joint_positions(robot.joint_names, VectorXd::Zero(6));
+    CHECK(same_pose_error(arm.fkm(VectorXd::Zero(6)), mi.get_site_pose(effector)) < 1e-9);
+    mi.reset_simulation(robot.home_keyframe);
+    const VectorXd q_home = mi.get_joint_positions(robot.joint_names);
+    CHECK(same_pose_error(arm.fkm(q_home), mi.get_site_pose(effector)) < 1e-9);
+
+    // Random configurations within the joint limits
+    std::mt19937 generator(42);
+    const VectorXd q_min = arm.get_lower_q_limit();
+    const VectorXd q_max = arm.get_upper_q_limit();
+    for (int k = 0; k < 50; k++)
+    {
+        VectorXd q(6);
+        for (int i = 0; i < 6; i++)
+            q(i) = std::uniform_real_distribution<double>(q_min(i), q_max(i))(generator);
+        mi.set_joint_positions(robot.joint_names, q);
+        CHECK(same_pose_error(arm.fkm(q), mi.get_site_pose(effector)) < 1e-9);
+    }
+}
+
+static void generic_quadruped_kinematics()
+{
+    // The DQ Robotics legs must agree with the MuJoCo model: x_trunk * legs[i].fkm(q_leg) is the
+    // pose of foot i, for any trunk pose and leg configuration
+    const DQ_MujocoRobotDescription robot = GenericQuadrupedRobot::description();
+    std::vector<DQ_SerialManipulatorDH> legs = GenericQuadrupedRobot::kinematics();
+    CHECK(legs.size() == robot.end_effector_sites.size());
+
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(robot.model);
+
+    // x and -x are the same pose
+    auto same_pose_error = [](const DQ& a, const DQ& b)
+    {
+        return std::min(vec8(a - b).norm(), vec8(a + b).norm());
+    };
+
+    // At q = 0, with the trunk at the origin, the feet hang 0.30 m below the hips
+    mi.set_base_pose(robot.floating_base, DQ(1));
+    mi.set_joint_positions(robot.joint_names, VectorXd::Zero(8));
+    for (std::size_t i = 0; i < legs.size(); i++)
+    {
+        const VectorXd p = legs.at(i).fkm(VectorXd::Zero(2)).translation().vec3();
+        CHECK_NEAR(std::abs(p(0)), 0.17);
+        CHECK_NEAR(std::abs(p(1)), 0.13);
+        CHECK_NEAR(p(2), -0.30);
+        CHECK(same_pose_error(legs.at(i).fkm(VectorXd::Zero(2)), mi.get_site_pose(robot.end_effector_sites.at(i))) < 1e-9);
+    }
+
+    // Random trunk poses and leg configurations within the joint limits
+    std::mt19937 generator(7);
+    std::uniform_real_distribution<double> uniform(-1.0, 1.0);
+    for (int k = 0; k < 30; k++)
+    {
+        const DQ axis = (uniform(generator)*i_ + uniform(generator)*j_ + uniform(generator)*k_).normalize();
+        const double angle = M_PI*uniform(generator);
+        const DQ r = cos(angle/2) + axis*sin(angle/2);
+        const DQ x_trunk = r + 0.5*E_*(uniform(generator)*i_ + uniform(generator)*j_ + (1 + uniform(generator))*k_)*r;
+        mi.set_base_pose(robot.floating_base, x_trunk);
+
+        VectorXd q(8);
+        for (std::size_t i = 0; i < legs.size(); i++)
+            for (int j = 0; j < 2; j++)
+                q(2*i + j) = std::uniform_real_distribution<double>(legs.at(i).get_lower_q_limit()(j),
+                                                                    legs.at(i).get_upper_q_limit()(j))(generator);
+        mi.set_joint_positions(robot.joint_names, q);
+
+        for (std::size_t i = 0; i < legs.size(); i++)
+        {
+            const VectorXd q_leg = q.segment(2*i, 2);
+            const DQ x_foot = mi.get_site_pose(robot.end_effector_sites.at(i));
+            CHECK(same_pose_error(x_trunk*legs.at(i).fkm(q_leg), x_foot) < 1e-9);
+
+            // The world-frame Jacobian of the documentation equals the one of a leg whose reference
+            // frame (the frame fkm() and pose_jacobian() use) is moved to the world
+            DQ_SerialManipulatorDH leg_in_world = legs.at(i);
+            leg_in_world.set_reference_frame(x_trunk*legs.at(i).get_reference_frame());
+            CHECK(same_pose_error(leg_in_world.fkm(q_leg), x_foot) < 1e-9);
+            CHECK((hamiplus8(x_trunk)*legs.at(i).pose_jacobian(q_leg) - leg_in_world.pose_jacobian(q_leg)).norm() < 1e-9);
+        }
+    }
+}
+
+static void camera_tracking()
+{
+    // Windowed, so that the tracking camera is actually used by the renderer
+    DQ_MujocoInterface mi;
+    mi.load_model("floating_base.xml");
+    mi.set_camera_tracking("base");
+    mi.set_base_pose("base", 1 + 0.5*E_*(5.0*i_ + 3.0*j_ + 2.0*k_));
+    glfwGetError(nullptr);  // clear any previous error
+    for (int i = 0; i < 3; i++)
+    {
+        mi.trigger_next_simulation_step();
+        mi.render();
+    }
+    mi.set_camera_tracking("");  // back to a free camera
+    mi.render();
+    CHECK(glfwGetError(nullptr) == GLFW_NO_ERROR);
+    CHECK_THROWS(std::runtime_error, mi.set_camera_tracking("unknown"));
+
+    // The tracked body id must not leak into another model
+    mi.set_camera_tracking("tail");
+    mi.load_model("pendulum.xml");
+    mi.render();
+}
+
 /*********************************************
  * RUNNER
  * *******************************************/
@@ -330,6 +816,21 @@ int main(int argc, char** argv)
         {"headless_mode_needs_no_display", headless_mode_needs_no_display},
         {"reference_frames_api", reference_frames_api},
         {"reference_frames_more_than_scene_capacity", reference_frames_more_than_scene_capacity},
+        {"base_pose_set_and_get", base_pose_set_and_get},
+        {"base_twist_matches_motion", base_twist_matches_motion},
+        {"base_twist_reference_frames", base_twist_reference_frames},
+        {"base_falls_under_gravity", base_falls_under_gravity},
+        {"joint_methods_reject_free_and_ball_joints", joint_methods_reject_free_and_ball_joints},
+        {"joint_and_floating_base_names", joint_and_floating_base_names},
+        {"reset_to_keyframe", reset_to_keyframe},
+        {"camera_tracking", camera_tracking},
+        {"load_model_from_memory", load_model_from_memory},
+        {"load_model_from_memory_errors", load_model_from_memory_errors},
+        {"embedded_model_with_assets", embedded_model_with_assets},
+        {"generic_quadruped_description", generic_quadruped_description},
+        {"generic_manipulator_description", generic_manipulator_description},
+        {"generic_manipulator_kinematics", generic_manipulator_kinematics},
+        {"generic_quadruped_kinematics", generic_quadruped_kinematics},
     };
 
     std::vector<std::string> selected;
