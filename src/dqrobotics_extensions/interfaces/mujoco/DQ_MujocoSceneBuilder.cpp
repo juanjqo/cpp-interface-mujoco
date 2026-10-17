@@ -11,8 +11,17 @@ It uses DQ Robotics (https://dqrobotics.github.io) but is not part of DQ Robotic
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <mutex>
 #include <set>
 #include <stdexcept>
+
+// The precision of the numbers in the XML that MuJoCo writes: 6 significant digits by default, and
+// 0 to write each number exactly (the shortest text that reads back as the same number). Exported by
+// MuJoCo (src/xml/xml_numeric_format.h) but not in its public headers.
+extern "C" {
+MJAPI int _mjPRIVATE__get_xml_precision();
+MJAPI void _mjPRIVATE__set_xml_precision(const int precision);
+}
 
 namespace DQ_robotics_extensions
 {
@@ -633,6 +642,18 @@ std::string DQ_MujocoSceneBuilder::Impl::to_xml() const
     if (!model)
         throw std::runtime_error(function_name + ". Invalid scene: " + mjs_getError(copy.spec));
     mj_deleteModel(model);
+
+    // Written with exact numbers: with the default 6 significant digits, the poses, inertias and
+    // keyframes of the scene would change (e.g., a joint at pi/2 would be at 1.5708). The precision
+    // is global in MuJoCo, so this is done by one thread at a time, and restored afterwards.
+    static std::mutex precision_mutex;
+    const std::lock_guard<std::mutex> lock(precision_mutex);
+    struct ExactPrecision
+    {
+        const int previous = _mjPRIVATE__get_xml_precision();
+        ExactPrecision() { _mjPRIVATE__set_xml_precision(0); }
+        ~ExactPrecision() { _mjPRIVATE__set_xml_precision(previous); }
+    } exact_precision;
 
     char error[1000] = "";
     const int size = mj_saveXMLString(copy.spec, nullptr, 0, error, sizeof(error));

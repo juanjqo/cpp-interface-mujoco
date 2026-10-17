@@ -927,6 +927,32 @@ static void scene_builder_build()
     CHECK_NEAR(pose_error(mi.get_site_pose("target"), test_pose()), 0.0);
 }
 
+static void scene_builder_exact_numbers()
+{
+    // The scene keeps every number exactly (MuJoCo writes 6 significant digits by default): the poses
+    // where the elements were placed, and the keyframe, for poses that are not round numbers
+    const DQ r = cos(0.5) + sin(0.5)*normalize(1.0*i_ + 2.0*j_ + 3.0*k_);
+    const DQ x_arm = r + 0.5*E_*(0.123456789*i_ + M_PI*j_ + M_E*k_)*r;
+    const DQ x_box = r.conj() + 0.5*E_*(M_SQRT2*i_)*r.conj();
+    const DQ x_ball = r + 0.5*E_*(1.0/3.0*i_ + 1.0*k_)*r;
+    DQ_MujocoSceneBuilder builder;
+    builder.set_gravity({0, 0, 0});
+    builder.add_box("box", x_box, {0.1, 0.1, 0.1});
+    builder.add_sphere("ball", x_ball, 0.05, BODY::FREE);
+    const DQ_MujocoRobotDescription arm = builder.add_robot(GenericManipulatorRobot::description(), "arm_", x_arm);
+
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(builder.build());
+    mi.reset_simulation("home");
+    CHECK(pose_error(mi.get_body_pose("box"), x_box) < 1e-14);
+    CHECK(pose_error(mi.get_base_pose("ball"), x_ball) < 1e-14);
+    DQ_SerialManipulatorDH kinematics = GenericManipulatorRobot::kinematics();
+    kinematics.set_reference_frame(x_arm*kinematics.get_reference_frame());
+    const DQ x_effector = mi.get_site_pose(arm.end_effector_sites.at(0));
+    const DQ x_kinematics = kinematics.fkm(mi.get_joint_positions(arm.joint_names));
+    CHECK(std::min(vec8(x_kinematics - x_effector).norm(), vec8(x_kinematics + x_effector).norm()) < 1e-12);
+}
+
 static void scene_builder_options_and_errors()
 {
     DQ_MujocoSceneBuilder builder;
@@ -1887,6 +1913,7 @@ int main(int argc, char** argv)
         {"reset_to_keyframe", reset_to_keyframe},
         {"camera_tracking", camera_tracking},
         {"scene_builder_build", scene_builder_build},
+        {"scene_builder_exact_numbers", scene_builder_exact_numbers},
         {"scene_builder_options_and_errors", scene_builder_options_and_errors},
         {"edit_scene_while_running", edit_scene_while_running},
         {"edit_scene_of_a_model_file", edit_scene_of_a_model_file},

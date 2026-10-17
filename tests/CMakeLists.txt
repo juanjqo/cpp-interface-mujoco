@@ -56,6 +56,7 @@ set(TESTS
     reset_to_keyframe
     camera_tracking
     scene_builder_build
+    scene_builder_exact_numbers
     scene_builder_options_and_errors
     edit_scene_while_running
     edit_scene_of_a_model_file
