@@ -69,6 +69,9 @@ set(TESTS
     unitree_z1_kinematics
     scene_builder_robot_with_meshes
     edit_scene_robot_with_meshes
+    unitree_b1_description
+    unitree_b1_kinematics
+    scene_builder_b1_and_z1
 )
 foreach(test_name IN LISTS TESTS)
     add_test(NAME ${test_name}

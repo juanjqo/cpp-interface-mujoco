@@ -26,6 +26,7 @@ xvfb-run.
 #include "dqrobotics_extensions/interfaces/mujoco/DQ_MujocoSceneBuilder.h"
 #include "dqrobotics_extensions/interfaces/mujoco/robots/GenericManipulatorRobot.h"
 #include "dqrobotics_extensions/interfaces/mujoco/robots/GenericQuadrupedRobot.h"
+#include "dqrobotics_extensions/interfaces/mujoco/robots/UnitreeB1Robot.h"
 #include "dqrobotics_extensions/interfaces/mujoco/robots/UnitreeZ1Robot.h"
 #include <GLFW/glfw3.h>
 #include <atomic>
@@ -905,6 +906,7 @@ static void scene_builder_options_and_errors()
     DQ_MujocoRobotDescription missing_files = UnitreeZ1Robot::description(UnitreeZ1Robot::GRIPPER::WITHOUT);
     missing_files.model.assets.clear();
     CHECK_THROWS(std::runtime_error, builder.add_robot(missing_files, "z1_"));  // its meshes
+    CHECK_THROWS(std::invalid_argument, builder.add_robot(GenericQuadrupedRobot::description(), ""));  // no prefix
 
     // Removing an element
     builder.remove("ball");
@@ -1250,6 +1252,178 @@ static void edit_scene_robot_with_meshes()
     }
 }
 
+/*********************************************
+ * UNITREE B1 (A QUADRUPED WITH MESHES, FROM cpp-interface-mujoco-models)
+ * *******************************************/
+
+using ACTUATORS = UnitreeB1Robot::ACTUATORS;
+
+static VectorXd b1_q_home()
+{
+    return vec({0, 0.7, -1.2, 0, 0.7, -1.2, 0, 0.7, -1.2, 0, 0.7, -1.2});
+}
+
+// A floor and a robot, built; the robot is added to mi, which returns its names in the scene
+static DQ_MujocoRobotDescription load_on_a_floor(DQ_MujocoInterface& mi, const DQ_MujocoRobotDescription& robot)
+{
+    DQ_MujocoSceneBuilder builder;
+    builder.add_floor();
+    const DQ_MujocoRobotDescription placed = builder.add_robot(robot, "b1_");
+    mi.load_model(builder.build());
+    return placed;
+}
+
+static void unitree_b1_description()
+{
+    const DQ_MujocoRobotDescription position = UnitreeB1Robot::description();
+    const DQ_MujocoRobotDescription torque = UnitreeB1Robot::description(ACTUATORS::TORQUE);
+    for (const DQ_MujocoRobotDescription& robot : {position, torque})
+    {
+        CHECK(robot.floating_base == "base");
+        CHECK(robot.joint_names.size() == 12);
+        CHECK(robot.joint_names.at(0) == "FL_hip_joint" && robot.joint_names.at(11) == "RR_calf_joint");
+        CHECK(robot.gripper_joint_names.empty());
+        CHECK((robot.end_effector_sites == std::vector<std::string>{"FL_foot", "FR_foot", "RL_foot", "RR_foot"}));
+        CHECK(robot.model.assets.count("b1_robot.xml") == 1);  // included by both
+        CHECK(robot.model.assets.count("b1_torque.xml") == 0);
+
+        DQ_MujocoInterface mi(HEADLESS);
+        mi.load_model(robot.model);
+        CHECK(mi.get_joint_names(true) == robot.joint_names);
+        mi.reset_simulation(robot.home_keyframe);
+        CHECK_NEAR((mi.get_joint_positions(robot.joint_names) - b1_q_home()).norm(), 0.0);
+        CHECK_NEAR(mi.get_base_pose(robot.floating_base).translation().q(3), 0.615);
+    }
+    CHECK(position.model.name == "b1.xml");
+    CHECK(torque.model.name == "b1_torque.xml");
+
+    // With position actuators, it stands at home; with torque motors and no torques, it falls
+    for (const bool& with_position_actuators : {true, false})
+    {
+        DQ_MujocoInterface mi(HEADLESS);
+        const DQ_MujocoRobotDescription robot = load_on_a_floor(mi, with_position_actuators ? position : torque);
+        mi.reset_simulation("home");
+        for (int i = 0; i < 1500; i++)
+            mi.trigger_next_simulation_step();
+        const double height = mi.get_base_pose(robot.floating_base).translation().q(3);
+        if (with_position_actuators)
+        {
+            CHECK(height > 0.58 && height < 0.62);
+            CHECK((mi.get_joint_positions(robot.joint_names) - b1_q_home()).norm() < 0.1);
+            CHECK(mi.get_joint_velocities(robot.joint_names).norm() < 1e-2);
+        }
+        else
+        {
+            CHECK(height < 0.3);
+        }
+    }
+
+    // With torque motors, the torques hold it: a PD controller on the home configuration
+    DQ_MujocoInterface mi(HEADLESS);
+    const DQ_MujocoRobotDescription robot = load_on_a_floor(mi, torque);
+    mi.reset_simulation("home");
+    for (int i = 0; i < 1500; i++)
+    {
+        const VectorXd q = mi.get_joint_positions(robot.joint_names);
+        const VectorXd q_dot = mi.get_joint_velocities(robot.joint_names);
+        mi.set_joint_target_forces(robot.joint_names, 1000*(b1_q_home() - q) - 30*q_dot);
+        mi.trigger_next_simulation_step();
+    }
+    CHECK(mi.get_base_pose(robot.floating_base).translation().q(3) > 0.58);
+}
+
+static void unitree_b1_kinematics()
+{
+    // The DQ Robotics legs must agree with the MuJoCo model: x_base * legs[i].fkm(q_leg) is the
+    // pose of foot i, for any base pose and leg configuration
+    const DQ_MujocoRobotDescription robot = UnitreeB1Robot::description();
+    std::vector<DQ_SerialManipulatorDH> legs = UnitreeB1Robot::kinematics();
+    CHECK(legs.size() == robot.end_effector_sites.size());
+
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(robot.model);
+
+    // At q = 0, with the base at the origin, the feet hang 0.70 m below the thigh joints
+    mi.set_base_pose(robot.floating_base, DQ(1));
+    mi.set_joint_positions(robot.joint_names, VectorXd::Zero(12));
+    for (std::size_t i = 0; i < legs.size(); i++)
+    {
+        const DQ x_foot = legs.at(i).fkm(VectorXd::Zero(3));
+        const VectorXd p = x_foot.translation().vec3();
+        CHECK_NEAR(std::abs(p(0)), 0.3455);
+        CHECK_NEAR(std::abs(p(1)), 0.072 + 0.12675);
+        CHECK_NEAR(p(2), -0.70);
+        CHECK(same_pose_error(x_foot.P(), DQ(1)) < 1e-12);  // the orientation of the base
+        CHECK(same_pose_error(x_foot, mi.get_site_pose(robot.end_effector_sites.at(i))) < 1e-9);
+    }
+
+    // Random base poses and leg configurations within the joint limits
+    std::mt19937 generator(11);
+    std::uniform_real_distribution<double> unit(-1.0, 1.0);
+    for (int k = 0; k < 30; k++)
+    {
+        const DQ r = normalize(DQ(unit(generator), unit(generator), unit(generator), unit(generator)));
+        const DQ p = unit(generator)*i_ + unit(generator)*j_ + (1 + unit(generator))*k_;
+        const DQ x_base = r + 0.5*E_*p*r;
+        VectorXd q(12);
+        for (std::size_t i = 0; i < legs.size(); i++)
+            for (int j = 0; j < 3; j++)
+                q(3*i + j) = std::uniform_real_distribution<double>(legs.at(i).get_lower_q_limit()(j),
+                                                                    legs.at(i).get_upper_q_limit()(j))(generator);
+        mi.set_base_pose(robot.floating_base, x_base);
+        mi.set_joint_positions(robot.joint_names, q);
+        for (std::size_t i = 0; i < legs.size(); i++)
+        {
+            const VectorXd q_leg = q.segment(3*i, 3);
+            CHECK(same_pose_error(x_base*legs.at(i).fkm(q_leg), mi.get_site_pose(robot.end_effector_sites.at(i))) < 1e-9);
+        }
+    }
+}
+
+static void scene_builder_b1_and_z1()
+{
+    // Two B1 and a Z1 in a built scene (whose contact options are MuJoCo's defaults, not those of the
+    // B1 model): the B1s stand where they were placed, and the meshes of the second B1 are shared
+    const DQ r = cos(M_PI/4) + k_*sin(M_PI/4);  // 90 degrees about z
+    const DQ x_a = 1 + 0.5*E_*(1.0*j_);
+    const DQ x_b = r + 0.5*E_*(-1.0*j_)*r;
+    DQ_MujocoSceneBuilder builder;
+    builder.add_floor();
+    const auto a = builder.add_robot(UnitreeB1Robot::description(), "a_", x_a);
+    const auto b = builder.add_robot(UnitreeB1Robot::description(), "b_", x_b);
+    builder.add_robot(UnitreeZ1Robot::description(), "z1_", 1 + 0.5*E_*(1.0*i_));
+    const DQ_MujocoModel model = builder.build();
+    CHECK(model.assets.size() == 17 + 20);  // the meshes of a B1 and of a Z1, once
+
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(model);
+    const std::vector<std::pair<DQ_MujocoRobotDescription, DQ>> b1s = {{a, x_a}, {b, x_b}};
+
+    // At home, the kinematics of the legs match the feet, with the base pose of the simulation
+    mi.reset_simulation("home");
+    const std::vector<DQ_SerialManipulatorDH> legs = UnitreeB1Robot::kinematics();
+    for (const auto& [robot, x] : b1s)
+    {
+        const VectorXd q = mi.get_joint_positions(robot.joint_names);
+        const DQ x_base = mi.get_base_pose(robot.floating_base);
+        CHECK_NEAR(pose_error(x_base, x*(1 + 0.5*E_*(0.615*k_))), 0.0);  // placed at home
+        for (std::size_t i = 0; i < legs.size(); i++)
+            CHECK(same_pose_error(x_base*legs.at(i).fkm(q.segment(3*i, 3)),
+                                  mi.get_site_pose(robot.end_effector_sites.at(i))) < 1e-9);
+    }
+
+    // After 3 s, they stand where they were placed
+    for (int i = 0; i < 1500; i++)
+        mi.trigger_next_simulation_step();
+    for (const auto& [robot, x] : b1s)
+    {
+        const VectorXd p = mi.get_base_pose(robot.floating_base).translation().vec3();
+        const VectorXd p0 = x.translation().vec3();
+        CHECK(std::abs(p(0) - p0(0)) < 0.05 && std::abs(p(1) - p0(1)) < 0.05);
+        CHECK(p(2) > 0.58 && p(2) < 0.62);
+    }
+}
+
 static DQ_MujocoModel platform_scene()
 {
     // A kinematic platform at height 0.5, a ball above it, and a fixed wall
@@ -1525,6 +1699,9 @@ int main(int argc, char** argv)
         {"unitree_z1_kinematics", unitree_z1_kinematics},
         {"scene_builder_robot_with_meshes", scene_builder_robot_with_meshes},
         {"edit_scene_robot_with_meshes", edit_scene_robot_with_meshes},
+        {"unitree_b1_description", unitree_b1_description},
+        {"unitree_b1_kinematics", unitree_b1_kinematics},
+        {"scene_builder_b1_and_z1", scene_builder_b1_and_z1},
     };
 
     std::vector<std::string> selected;

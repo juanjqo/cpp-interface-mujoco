@@ -16,6 +16,7 @@ set(ROBOT_EXAMPLES
     floating_base
     scene_builder
     unitree_z1
+    unitree_b1
 )
 if(DQ_MUJOCO_BUILD_ROBOTS)
     list(APPEND EXAMPLES ${ROBOT_EXAMPLES})

@@ -283,6 +283,9 @@ DQ_MujocoRobotDescription DQ_MujocoSceneBuilder::Impl::add_robot(const DQ_Mujoco
     const std::string function_name = "Bad call in DQ_MujocoSceneBuilder::add_robot";
     if (robot.model.xml.empty())
         throw std::invalid_argument(function_name + ". The model of the robot is empty.");
+    // MuJoCo names the default classes of an attached model after the prefix
+    if (prefix.empty())
+        throw std::invalid_argument(function_name + ". The prefix cannot be empty.");
     if (!is_unit(pose))
         throw std::invalid_argument(function_name + ". The pose must be a unit dual quaternion!");
 
@@ -790,7 +793,7 @@ void DQ_MujocoSceneBuilder::add_site(const std::string& name, const DQ& pose, co
  * @brief Add a robot, e.g., one of the robots library
  * @param robot The robot (GenericQuadrupedRobot::description(), ...).
  * @param prefix Prefix added to every name of the robot, so that several robots can be added (e.g.,
- *        "arm_" turns the joint "joint1" into "arm_joint1").
+ *        "arm_" turns the joint "joint1" into "arm_joint1"). It cannot be empty.
  * @param pose Where the robot is placed: the pose of the robot's world frame in the scene. For a
  *        floating-base robot, its home configuration is moved there too.
  * @return The description of the robot in the scene: its prefixed names, and "home" as its home
@@ -812,7 +815,8 @@ void DQ_MujocoSceneBuilder::add_site(const std::string& name, const DQ& pose, co
  * the robots library. They are added to the scene under robot_assets/, once even if the robot is
  * added several times.
  *
- * @throws std::invalid_argument If the robot does not have exactly one body attached to its world,
+ * @throws std::invalid_argument If the prefix is empty, the robot does not have exactly one body
+ *         attached to its world,
  *         has no keyframe named home_keyframe, uses a file that is not in its assets, or if its
  *         names clash with the scene
  */
