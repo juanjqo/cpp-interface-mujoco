@@ -119,10 +119,12 @@ public:
                   const double& size = 0.02,
                   const Eigen::Vector4d& rgba = Eigen::Vector4d(1.0, 0.0, 0.0, 0.5));
 
-    // Robots of the robots library (or any robot described by a DQ_MujocoRobotDescription)
+    // Robots of the robots library (or any robot described by a DQ_MujocoRobotDescription), in the
+    // world or mounted on a body of the scene (e.g., an arm on a quadruped)
     DQ_MujocoRobotDescription add_robot(const DQ_MujocoRobotDescription& robot,
                                         const std::string& prefix,
-                                        const DQ_robotics::DQ& pose = DQ_robotics::DQ(1));
+                                        const DQ_robotics::DQ& pose = DQ_robotics::DQ(1),
+                                        const std::string& parent_body = "");
 
     // Remove an object, a site, a light, the floor, or a robot (by the prefixed name of its root body)
     void remove(const std::string& name);

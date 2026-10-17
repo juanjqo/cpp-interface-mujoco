@@ -72,6 +72,7 @@ set(TESTS
     generic_manipulator_description
     generic_manipulator_kinematics
     generic_quadruped_kinematics
+    scene_builder_mounted_robot
     scene_builder_robot_with_meshes
     edit_scene_robot_with_meshes
 )

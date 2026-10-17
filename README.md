@@ -446,6 +446,16 @@ mi.reset_simulation("home");   // every robot at its home configuration, where i
 - **Robots** are added with a prefix (not empty) for all their names, so a robot can be added several times. `add_robot()`
   returns the description of the placed robot (prefixed names). Only the robot itself is added: the floor, lights and
   sky of its model are not, nor its unused materials and textures, and the physics options are those of the scene.
+- **Mounting a robot on another one:** pass a body of the scene as the parent, e.g., an arm on the back of a
+  quadruped. The pose is then relative to that body, which carries the robot:
+  ```cpp
+  auto dog = scene.add_robot(GenericQuadrupedRobot::description(), "dog_");
+  auto arm = scene.add_robot(GenericManipulatorRobot::description(), "arm_", x_mount, dog.floating_base);
+  ```
+  Only robots without a floating base can be mounted, since MuJoCo only allows free joints in bodies attached to
+  the world. The reference frame of the arm's kinematics moves with the body:
+  `get_base_pose(dog.floating_base)*x_mount*kinematics.get_reference_frame()`. Removing the quadruped removes the
+  arm with it.
 - **The "home" keyframe** of the scene has each robot at its own home keyframe, moved to where it was placed (MuJoCo
   does not move the keyframes of attached floating-base robots), and every other element at its initial pose.
 - **How objects move:**
@@ -576,7 +586,7 @@ but not drawn.
 | `add_light(name, position, direction, directional)` | A spot or directional light |
 | `add_box/sphere/cylinder/capsule(name, x, sizes..., body, rgba, mass)` | A primitive object, `FIXED`, `KINEMATIC` or `FREE` |
 | `add_site(name, x, size, rgba)` | A site in the world (a frame without physics) |
-| `add_robot(robot, prefix, x)` | A robot (e.g., of the robots library), placed at `x`; returns its description in the scene |
+| `add_robot(robot, prefix, x, parent)` | A robot (e.g., of the robots library), placed at `x` in the world, or mounted at `x` on the body `parent`; returns its description in the scene |
 | `remove(name)` | Remove an object, site, light, the floor, or a robot (by its prefixed root body) |
 | `build()` | The scene as a `DQ_MujocoModel`, with a "home" keyframe |
 

@@ -63,7 +63,8 @@ public:
                        const double size[3], const BODY& body, const Eigen::Vector4d& rgba,
                        const double& mass);
     DQ_MujocoRobotDescription add_robot(const DQ_MujocoRobotDescription& robot,
-                                        const std::string& prefix, const DQ_robotics::DQ& pose);
+                                        const std::string& prefix, const DQ_robotics::DQ& pose,
+                                        const std::string& parent_body);
     void remove(const std::string& name);
 
     // Reads the "home" values from a keyframe of a model

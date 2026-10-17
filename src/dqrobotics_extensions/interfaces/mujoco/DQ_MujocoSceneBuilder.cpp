@@ -278,7 +278,8 @@ void DQ_MujocoSceneBuilder::Impl::add_primitive(const std::string& name, const D
 }
 
 DQ_MujocoRobotDescription DQ_MujocoSceneBuilder::Impl::add_robot(const DQ_MujocoRobotDescription& robot,
-                                                                 const std::string& prefix, const DQ& pose)
+                                                                 const std::string& prefix, const DQ& pose,
+                                                                 const std::string& parent_body)
 {
     const std::string function_name = "Bad call in DQ_MujocoSceneBuilder::add_robot";
     if (robot.model.xml.empty())
@@ -288,6 +289,10 @@ DQ_MujocoRobotDescription DQ_MujocoSceneBuilder::Impl::add_robot(const DQ_Mujoco
         throw std::invalid_argument(function_name + ". The prefix cannot be empty.");
     if (!is_unit(pose))
         throw std::invalid_argument(function_name + ". The pose must be a unit dual quaternion!");
+    mjsBody* parent = parent_body.empty() ? world() : mjs_findBody(spec_, parent_body.c_str());
+    if (!parent)
+        throw std::invalid_argument(function_name + ". There is no body \"" + parent_body + "\" in the scene.");
+    const bool in_the_world = parent == world();
 
     // Parse the robot into its own specification (the attach moves its elements into the scene)
     const std::string file_name = robot.model.name.empty() ? "robot.xml" : robot.model.name;
@@ -343,6 +348,12 @@ DQ_MujocoRobotDescription DQ_MujocoSceneBuilder::Impl::add_robot(const DQ_Mujoco
     const std::string root_name = name_of(model, mjOBJ_BODY, root_id);
     if (root_name.empty())
         throw std::invalid_argument(function_name + ". The root body of the robot must have a name.");
+    // MuJoCo only allows free joints in bodies attached to the world
+    if (!in_the_world)
+        for (int j = 0; j < model->njnt; j++)
+            if (model->jnt_type[j] == mjJNT_FREE)
+                throw std::invalid_argument(function_name + ". A robot with a floating base can only be "
+                                            "added to the world, not to the body \"" + parent_body + "\".");
     check_name_is_free(mjOBJ_BODY, prefix + root_name);
 
     const std::map<std::string, const std::vector<unsigned char>*> files
@@ -352,7 +363,7 @@ DQ_MujocoRobotDescription DQ_MujocoSceneBuilder::Impl::add_robot(const DQ_Mujoco
         file_elements_before[type] = elements_of(spec_, type);
     const std::set<mjsElement*>& textures_before = file_elements_before[mjOBJ_TEXTURE];
     const std::set<mjsElement*> materials_before = elements_of(spec_, mjOBJ_MATERIAL);
-    mjsFrame* frame = mjs_addFrame(world(), nullptr);
+    mjsFrame* frame = mjs_addFrame(parent, nullptr);
     set_pose(frame->pos, frame->quat, pose, function_name);
     if (!mjs_attach(frame->element, mjs_findBody(child, root_name.c_str())->element, prefix.c_str(), ""))
     {
@@ -794,8 +805,12 @@ void DQ_MujocoSceneBuilder::add_site(const std::string& name, const DQ& pose, co
  * @param robot The robot (GenericQuadrupedRobot::description(), ...).
  * @param prefix Prefix added to every name of the robot, so that several robots can be added (e.g.,
  *        "arm_" turns the joint "joint1" into "arm_joint1"). It cannot be empty.
- * @param pose Where the robot is placed: the pose of the robot's world frame in the scene. For a
- *        floating-base robot, its home configuration is moved there too.
+ * @param pose Where the robot is placed: the pose of the robot's world frame in the scene, or in the
+ *        frame of parent_body. For a floating-base robot, its home configuration is moved there too.
+ * @param parent_body The body that the robot is mounted on (e.g., the floating base of a
+ *        quadruped, "dog_trunk", for an arm on its back), which then carries it. Empty (the
+ *        default): the robot is placed in the world. Only robots without a floating base can be
+ *        mounted on a body.
  * @return The description of the robot in the scene: its prefixed names, and "home" as its home
  *         keyframe (the keyframe of the scene, which also has the other robots at home). Its model
  *         is empty: load the scene with build().
@@ -810,20 +825,24 @@ void DQ_MujocoSceneBuilder::add_site(const std::string& name, const DQ& pose, co
  * DQ_SerialManipulatorDH kinematics = GenericManipulatorRobot::kinematics();
  * kinematics.set_reference_frame(x*kinematics.get_reference_frame());
  * @endcode
+ * For a robot mounted at pose x on a body, its reference frame moves with the body: use
+ * x_body*x*kinematics.get_reference_frame(), with x_body = DQ_MujocoInterface::get_body_pose() of the
+ * body (or get_base_pose(), for a floating base), updated as the body moves.
  *
  * The files of the robot (meshes, textures) must be in the assets of its model, as in the robots of
  * the robots library. They are added to the scene under robot_assets/, once even if the robot is
  * added several times.
  *
- * @throws std::invalid_argument If the prefix is empty, the robot does not have exactly one body
- *         attached to its world,
- *         has no keyframe named home_keyframe, uses a file that is not in its assets, or if its
- *         names clash with the scene
+ * @throws std::invalid_argument If the prefix is empty, there is no parent_body, the robot does not
+ *         have exactly one body attached to its world, has a floating base and a parent_body, has
+ *         no keyframe named home_keyframe, uses a file that is not in its assets, or if its names
+ *         clash with the scene
  */
 DQ_MujocoRobotDescription DQ_MujocoSceneBuilder::add_robot(const DQ_MujocoRobotDescription& robot,
-                                                           const std::string& prefix, const DQ& pose)
+                                                           const std::string& prefix, const DQ& pose,
+                                                           const std::string& parent_body)
 {
-    return impl_->add_robot(robot, prefix, pose);
+    return impl_->add_robot(robot, prefix, pose, parent_body);
 }
 
 /**
