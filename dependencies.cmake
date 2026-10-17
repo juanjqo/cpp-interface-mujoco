@@ -21,6 +21,21 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(mujoco)
 
+# MuJoCo links its dependencies (tinyxml2, qhull, ccd, ...) statically into libmujoco.so, and
+# tinyxml2 marks its symbols visible: without this, libmujoco.so exports them, and the libraries of
+# the same process that use their own tinyxml2 bind to MuJoCo's copy and crash (e.g., Fast DDS, in
+# any ROS 2 node). --exclude-libs hides the symbols of the static libraries (those of MuJoCo itself
+# are not in them, so they stay exported), but the linker ignores it for objects built with LTO,
+# which MuJoCo enables: the dependencies are built without it (MuJoCo itself keeps it).
+if(UNIX AND NOT APPLE AND TARGET mujoco)
+    target_link_options(mujoco PRIVATE "LINKER:--exclude-libs,ALL")
+    foreach(dependency IN ITEMS tinyxml2 qhullstatic_r ccd miniz tinyobjloader lodepng)
+        if(TARGET ${dependency})
+            set_property(TARGET ${dependency} PROPERTY INTERPROCEDURAL_OPTIMIZATION OFF)
+        endif()
+    endforeach()
+endif()
+
 set(MUJOCO_INCLUDE_DIR ${mujoco_SOURCE_DIR}/include)
 set(MUJOCO_LIB_DIR ${mujoco_SOURCE_DIR}/lib)
 
