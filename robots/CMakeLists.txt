@@ -56,14 +56,16 @@ dq_mujoco_embed_model(${ROBOTS_TARGET}
     MAIN      b1.xml
     ASSETS    b1_velocity.xml b1_torque.xml b1_robot.xml ${unitree_b1_meshes}
 )
-# The Z1 with its gripper, and without it (z1.xml, as one more asset), sharing the meshes
+# The Z1 with its gripper and position actuators, and the other variants (as more assets), sharing the
+# robots they include (z1_robot.xml and z1_gripper_robot.xml) and the meshes
 file(GLOB unitree_z1_meshes RELATIVE ${MODELS_DIR}/unitree_z1
      CONFIGURE_DEPENDS ${MODELS_DIR}/unitree_z1/assets/*.stl)
 dq_mujoco_embed_model(${ROBOTS_TARGET}
     FUNCTION  unitree_z1
     DIRECTORY ${MODELS_DIR}/unitree_z1
     MAIN      z1_gripper.xml
-    ASSETS    z1.xml ${unitree_z1_meshes}
+    ASSETS    z1.xml z1_velocity.xml z1_torque.xml z1_gripper_velocity.xml z1_gripper_torque.xml
+              z1_robot.xml z1_gripper_robot.xml ${unitree_z1_meshes}
 )
 
 target_include_directories(${ROBOTS_TARGET} PUBLIC

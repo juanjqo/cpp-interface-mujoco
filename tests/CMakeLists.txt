@@ -67,6 +67,7 @@ set(TESTS
     generic_quadruped_kinematics
     unitree_z1_description
     unitree_z1_kinematics
+    unitree_z1_actuators
     scene_builder_robot_with_meshes
     edit_scene_robot_with_meshes
     unitree_b1_description

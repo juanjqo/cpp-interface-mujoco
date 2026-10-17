@@ -1070,9 +1070,10 @@ static void unitree_z1_description()
     CHECK(with.gripper_joint_names == std::vector<std::string>{"jointGripper"});
     CHECK(without.gripper_joint_names.empty());
     CHECK(with.end_effector_sites == std::vector<std::string>{"end_effector"});
-    // 7 meshes for the arm and 13 for the gripper: the model without the gripper only has the first
-    CHECK(with.model.assets.size() == 20);
-    CHECK(without.model.assets.size() == 7);
+    // 7 meshes for the arm and 13 for the gripper (the model without the gripper only has the first),
+    // and the robot file that the model includes
+    CHECK(with.model.assets.size() == 20 + 1 && with.model.assets.count("z1_gripper_robot.xml") == 1);
+    CHECK(without.model.assets.size() == 7 + 1 && without.model.assets.count("z1_robot.xml") == 1);
 
     for (const DQ_MujocoRobotDescription& robot : {with, without})
     {
@@ -1104,6 +1105,67 @@ static void unitree_z1_description()
     for (int i = 0; i < 1000; i++)
         mi.trigger_next_simulation_step();
     CHECK(std::abs(mi.get_joint_positions(with.gripper_joint_names)(0) + 1.0) < 0.05);
+}
+
+static void unitree_z1_actuators()
+{
+    // Each kind of actuator of the arm, with and without the gripper, which always has a position
+    // actuator
+    using Z1ACTUATORS = UnitreeZ1Robot::ACTUATORS;
+    auto run_3s = [](DQ_MujocoInterface& mi, const DQ_MujocoRobotDescription& robot,
+                     const std::function<void()>& control)
+    {
+        mi.load_model(robot.model);
+        mi.reset_simulation(robot.home_keyframe);
+        for (int i = 0; i < 1500; i++)
+        {
+            control();
+            mi.trigger_next_simulation_step();
+        }
+        return (mi.get_joint_positions(robot.joint_names) - z1_q_home()).cwiseAbs().maxCoeff();
+    };
+    for (const GRIPPER& gripper : {GRIPPER::WITH, GRIPPER::WITHOUT})
+    {
+        const DQ_MujocoRobotDescription position = UnitreeZ1Robot::description(gripper, Z1ACTUATORS::POSITION);
+        const DQ_MujocoRobotDescription velocity = UnitreeZ1Robot::description(gripper, Z1ACTUATORS::VELOCITY);
+        const DQ_MujocoRobotDescription torque = UnitreeZ1Robot::description(gripper, Z1ACTUATORS::TORQUE);
+        const std::string prefix = gripper == GRIPPER::WITH ? "z1_gripper" : "z1";
+        CHECK(position.model.name == prefix + ".xml");
+        CHECK(velocity.model.name == prefix + "_velocity.xml");
+        CHECK(torque.model.name == prefix + "_torque.xml");
+        for (const DQ_MujocoRobotDescription& robot : {velocity, torque})
+        {
+            CHECK(robot.joint_names == position.joint_names);
+            CHECK(robot.gripper_joint_names == position.gripper_joint_names);
+            CHECK(robot.model.assets.size() == position.model.assets.size());  // the same meshes and robot file
+        }
+
+        // With constant commands (those of the keyframe), position actuators hold the pose, and the
+        // others do not: with zero velocities the arm sinks, and with no torques it falls
+        DQ_MujocoInterface mi(HEADLESS);
+        CHECK(run_3s(mi, position, [] {}) < 0.01);
+        CHECK(run_3s(mi, velocity, [] {}) > 0.05);
+        CHECK(run_3s(mi, torque, [] {}) > 0.5);
+
+        // Each holds it with its own command: velocities of a proportional controller, and torques of
+        // a PD controller, on the home configuration
+        CHECK(run_3s(mi, velocity, [&] {
+                  mi.set_joint_target_velocities(velocity.joint_names, 10*(z1_q_home() - mi.get_joint_positions(velocity.joint_names)));
+              }) < 0.03);
+        CHECK(run_3s(mi, torque, [&] {
+                  const VectorXd q = mi.get_joint_positions(torque.joint_names);
+                  const VectorXd q_dot = mi.get_joint_velocities(torque.joint_names);
+                  mi.set_joint_target_forces(torque.joint_names, 300*(z1_q_home() - q) - 2*q_dot);
+              }) < 0.1);
+
+        // The gripper opens with a position command, whatever the actuators of the arm
+        if (gripper == GRIPPER::WITH)
+            for (const DQ_MujocoRobotDescription& robot : {velocity, torque})
+            {
+                run_3s(mi, robot, [&] { mi.set_joint_target_positions(robot.gripper_joint_names, vec({-1.0})); });
+                CHECK(std::abs(mi.get_joint_positions(robot.gripper_joint_names)(0) + 1.0) < 0.05);
+            }
+    }
 }
 
 static void unitree_z1_kinematics()
@@ -1700,6 +1762,7 @@ int main(int argc, char** argv)
         {"generic_quadruped_kinematics", generic_quadruped_kinematics},
         {"unitree_z1_description", unitree_z1_description},
         {"unitree_z1_kinematics", unitree_z1_kinematics},
+        {"unitree_z1_actuators", unitree_z1_actuators},
         {"scene_builder_robot_with_meshes", scene_builder_robot_with_meshes},
         {"edit_scene_robot_with_meshes", edit_scene_robot_with_meshes},
         {"unitree_b1_description", unitree_b1_description},

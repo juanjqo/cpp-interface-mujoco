@@ -14,9 +14,10 @@ It uses DQ Robotics (https://dqrobotics.github.io) but is not part of DQ Robotic
 namespace DQ_robotics_extensions
 {
 
-// Generated from models/unitree_z1 by dq_mujoco_embed_model (see robots/CMakeLists.txt): the model
-// with the gripper, z1_gripper.xml, with the model without it, z1.xml, as one more asset, so that
-// both share the meshes
+// Generated from cpp-interface-mujoco-models/unitree_z1 by dq_mujoco_embed_model (see
+// robots/CMakeLists.txt): the model with the gripper and position actuators, z1_gripper.xml, with the
+// other variants (and the robots they include, z1_robot.xml and z1_gripper_robot.xml) as more assets,
+// so that all of them share the meshes
 namespace embedded_models
 {
 DQ_MujocoModel unitree_z1();
@@ -25,24 +26,35 @@ DQ_MujocoModel unitree_z1();
 /**
  * @brief The MuJoCo model of the Unitree Z1 and the names needed to use it.
  * @param gripper GRIPPER::WITH (default) or GRIPPER::WITHOUT.
+ * @param actuators The actuators of the arm: ACTUATORS::POSITION (default), ACTUATORS::VELOCITY or
+ *        ACTUATORS::TORQUE. The gripper always has a position actuator.
  * @return The description. Its model is embedded in the library, so no files are needed.
  */
-DQ_MujocoRobotDescription UnitreeZ1Robot::description(const GRIPPER& gripper)
+DQ_MujocoRobotDescription UnitreeZ1Robot::description(const GRIPPER& gripper, const ACTUATORS& actuators)
 {
+    // The main file of the variant (z1_gripper_velocity.xml, ...), which includes its robot file
+    const std::string robot_file = gripper == GRIPPER::WITH ? "z1_gripper_robot.xml" : "z1_robot.xml";
+    std::string main_file = gripper == GRIPPER::WITH ? "z1_gripper" : "z1";
+    if (actuators == ACTUATORS::VELOCITY)
+        main_file += "_velocity";
+    if (actuators == ACTUATORS::TORQUE)
+        main_file += "_torque";
+    main_file += ".xml";
+
     DQ_MujocoModel model = embedded_models::unitree_z1();
-    const auto arm_only = model.assets.find("z1.xml");
-    if (gripper == GRIPPER::WITHOUT)
+    if (main_file != model.name)
     {
-        model.name = "z1.xml";
-        model.xml.assign(arm_only->second.begin(), arm_only->second.end());
-        model.assets.erase(arm_only);
-        // The meshes of the gripper are not used
-        for (auto it = model.assets.begin(); it != model.assets.end();)
-            it = it->first.find("Gripper") != std::string::npos ? model.assets.erase(it) : std::next(it);
+        const auto& xml = model.assets.at(main_file);
+        model.xml.assign(xml.begin(), xml.end());
+        model.name = main_file;
     }
-    else
+    // Only the robot file and the meshes of the variant are kept
+    for (auto it = model.assets.begin(); it != model.assets.end();)
     {
-        model.assets.erase(arm_only);
+        const std::string& name = it->first;
+        const bool other_xml = name.size() > 4 && name.compare(name.size() - 4, 4, ".xml") == 0 && name != robot_file;
+        const bool gripper_mesh = gripper == GRIPPER::WITHOUT && name.find("Gripper") != std::string::npos;
+        it = other_xml || gripper_mesh ? model.assets.erase(it) : std::next(it);
     }
 
     DQ_MujocoRobotDescription robot;
