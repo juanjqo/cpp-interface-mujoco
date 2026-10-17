@@ -1,24 +1,27 @@
 # Built from the top-level CMakeLists.txt (DQ_MUJOCO_BUILD_ROBOTS=ON)
 #
-# The robots library: robot models embedded in the library (no files needed at runtime), each with
-# a description class (e.g., GenericQuadrupedRobot::description()).
+# The generic robots library: generic robot models, built from primitive shapes and embedded in the
+# library (no files needed at runtime), each with a description class (e.g.,
+# GenericQuadrupedRobot::description()). The examples and the tests use them.
 #
-# To add a robot:
+# Models of real robots (e.g., the Unitree B1 and Z1) are in cpp-interface-mujoco-robots
+# (https://github.com/juanjqo/cpp-interface-mujoco-robots), a package built on this library.
+#
+# To add a generic robot:
 #   1. put its model in models/<robot>/ (main XML directly in that directory, assets below it)
 #   2. embed it with dq_mujoco_embed_model() below
 #   3. add include/.../robots/<Robot>Robot.h and src/<Robot>Robot.cpp, which fill the description
 
 include(${PROJECT_SOURCE_DIR}/cmake/DQMujocoEmbedModel.cmake)
 
-set(ROBOTS_TARGET ${PROJECT_NAME}-robots)
+set(ROBOTS_TARGET ${PROJECT_NAME}-generic-robots)
 
 add_library(${ROBOTS_TARGET}
     src/GenericManipulatorRobot.cpp
     src/GenericQuadrupedRobot.cpp
-    src/UnitreeZ1Robot.cpp
 )
-add_library(dqrobotics_extensions::interface-mujoco-robots ALIAS ${ROBOTS_TARGET})
-set_target_properties(${ROBOTS_TARGET} PROPERTIES EXPORT_NAME interface-mujoco-robots)
+add_library(dqrobotics_extensions::interface-mujoco-generic-robots ALIAS ${ROBOTS_TARGET})
+set_target_properties(${ROBOTS_TARGET} PROPERTIES EXPORT_NAME interface-mujoco-generic-robots)
 
 dq_mujoco_embed_model(${ROBOTS_TARGET}
     FUNCTION  generic_manipulator
@@ -29,15 +32,6 @@ dq_mujoco_embed_model(${ROBOTS_TARGET}
     FUNCTION  generic_quadruped
     DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/models/generic_quadruped
     MAIN      generic_quadruped.xml
-)
-# The Z1 with its gripper, and without it (z1.xml, as one more asset), sharing the meshes
-file(GLOB unitree_z1_meshes RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}/models/unitree_z1
-     CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/models/unitree_z1/assets/*.stl)
-dq_mujoco_embed_model(${ROBOTS_TARGET}
-    FUNCTION  unitree_z1
-    DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/models/unitree_z1
-    MAIN      z1_gripper.xml
-    ASSETS    z1.xml ${unitree_z1_meshes}
 )
 
 target_include_directories(${ROBOTS_TARGET} PUBLIC
@@ -60,7 +54,3 @@ install(TARGETS ${ROBOTS_TARGET}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-# The licenses of the embedded models that are not ours (BSD-3-Clause asks to ship its notice with
-# the binaries)
-install(FILES models/unitree_z1/LICENSE
-        DESTINATION ${CMAKE_INSTALL_DOCDIR}/robots/unitree_z1)

@@ -2674,8 +2674,8 @@ void DQ_MujocoInterface::set_camera_tracking(const std::string& bodyname)
  * @note Recommendation: build the scene before starting the control loop, and do not edit it while
  *       the loop runs. Each edit recompiles the whole scene, which stalls the simulation: about 10 ms
  *       with primitive shapes, but hundreds of milliseconds with robots that have large meshes (e.g.,
- *       about 260 ms to add a Unitree Z1). To move objects during the loop, use KINEMATIC bodies and
- *       set_body_pose().
+ *       about 260 ms to add a Unitree Z1 of cpp-interface-mujoco-robots). To move objects during the
+ *       loop, use KINEMATIC bodies and set_body_pose().
  *
  * @note Handles and names cached by the interface are refreshed, since the ids of the elements can
  *       change. Names given by the user stay valid.

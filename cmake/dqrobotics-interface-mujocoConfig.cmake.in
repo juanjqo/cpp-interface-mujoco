@@ -7,4 +7,7 @@ find_dependency(marinholab_sas_core)
 
 include("${CMAKE_CURRENT_LIST_DIR}/dqrobotics-interface-mujocoTargets.cmake")
 
+# dq_mujoco_embed_model(): embeds a MuJoCo model (XML and assets) in a target, as a C++ function
+include("${CMAKE_CURRENT_LIST_DIR}/DQMujocoEmbedModel.cmake")
+
 check_required_components(dqrobotics-interface-mujoco)

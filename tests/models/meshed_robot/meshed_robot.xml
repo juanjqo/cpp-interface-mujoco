@@ -1,0 +1,31 @@
+<mujoco model="meshed robot">
+  <!--
+    A robot with files, as the robots of cpp-interface-mujoco-robots, to test them in scenes (see
+    tests/CMakeLists.txt): a 2-joint arm with a mesh (under meshdir), a textured material (under
+    texturedir), an <include> file, and a skybox texture that scenes do not use.
+  -->
+  <compiler angle="radian" meshdir="meshes" texturedir="textures"/>
+
+  <option integrator="implicitfast"/>
+
+  <asset>
+    <mesh name="link" file="link.obj"/>
+    <texture name="checker" type="2d" file="checker.png"/>
+    <material name="checker" texture="checker"/>
+    <texture name="sky" type="skybox" file="sky.png" gridsize="6 1" gridlayout="RLDBFU"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 2" dir="0 0 -1"/>
+    <include file="parts/arm.xml"/>
+  </worldbody>
+
+  <actuator>
+    <position name="shoulder" joint="shoulder" kp="50" kv="5"/>
+    <position name="elbow" joint="elbow" kp="50" kv="5"/>
+  </actuator>
+
+  <keyframe>
+    <key name="home" qpos="0.3 -0.6" ctrl="0.3 -0.6"/>
+  </keyframe>
+</mujoco>

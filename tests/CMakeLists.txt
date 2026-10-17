@@ -7,12 +7,12 @@ add_custom_target(copy_test_models
 )
 
 if(NOT DQ_MUJOCO_BUILD_ROBOTS)
-    message(FATAL_ERROR "The tests need the robots library: configure with -DDQ_MUJOCO_BUILD_ROBOTS=ON")
+    message(FATAL_ERROR "The tests need the generic robots library: configure with -DDQ_MUJOCO_BUILD_ROBOTS=ON")
 endif()
 
 add_executable(test_interface test_interface.cpp)
 # GLFW is linked directly because one test checks the GLFW error state
-target_link_libraries(test_interface PRIVATE dqrobotics_extensions::interface-mujoco-robots glfw)
+target_link_libraries(test_interface PRIVATE dqrobotics_extensions::interface-mujoco-generic-robots glfw)
 add_dependencies(test_interface copy_test_models)
 
 # Embeds tests/models/embedded, to test dq_mujoco_embed_model (DQ_MUJOCO_BUILD_ROBOTS includes it)
@@ -21,6 +21,13 @@ dq_mujoco_embed_model(test_interface
     DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/models/embedded
     MAIN      scene.xml
     ASSETS    parts/arm.xml meshes/tetra.obj data/blob.bin
+)
+# A robot with files (a mesh, textures, an include file), to test robots with files in scenes
+dq_mujoco_embed_model(test_interface
+    FUNCTION  meshed_robot
+    DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/models/meshed_robot
+    MAIN      meshed_robot.xml
+    ASSETS    parts/arm.xml meshes/link.obj textures/checker.png textures/sky.png
 )
 
 # Each test runs in its own process, so a crash in one does not hide the others
@@ -65,8 +72,7 @@ set(TESTS
     generic_manipulator_description
     generic_manipulator_kinematics
     generic_quadruped_kinematics
-    unitree_z1_description
-    unitree_z1_kinematics
+    scene_builder_mounted_robot
     scene_builder_robot_with_meshes
     edit_scene_robot_with_meshes
 )
