@@ -1276,15 +1276,20 @@ static DQ_MujocoRobotDescription load_on_a_floor(DQ_MujocoInterface& mi, const D
 static void unitree_b1_description()
 {
     const DQ_MujocoRobotDescription position = UnitreeB1Robot::description();
+    const DQ_MujocoRobotDescription velocity = UnitreeB1Robot::description(ACTUATORS::VELOCITY);
     const DQ_MujocoRobotDescription torque = UnitreeB1Robot::description(ACTUATORS::TORQUE);
-    for (const DQ_MujocoRobotDescription& robot : {position, torque})
+    CHECK(position.model.name == "b1.xml");
+    CHECK(velocity.model.name == "b1_velocity.xml");
+    CHECK(torque.model.name == "b1_torque.xml");
+    for (const DQ_MujocoRobotDescription& robot : {position, velocity, torque})
     {
         CHECK(robot.floating_base == "base");
         CHECK(robot.joint_names.size() == 12);
         CHECK(robot.joint_names.at(0) == "FL_hip_joint" && robot.joint_names.at(11) == "RR_calf_joint");
         CHECK(robot.gripper_joint_names.empty());
         CHECK((robot.end_effector_sites == std::vector<std::string>{"FL_foot", "FR_foot", "RL_foot", "RR_foot"}));
-        CHECK(robot.model.assets.count("b1_robot.xml") == 1);  // included by both
+        CHECK(robot.model.assets.count("b1_robot.xml") == 1);  // included by all of them
+        CHECK(robot.model.assets.count("b1_velocity.xml") == 0);
         CHECK(robot.model.assets.count("b1_torque.xml") == 0);
 
         DQ_MujocoInterface mi(HEADLESS);
@@ -1294,42 +1299,40 @@ static void unitree_b1_description()
         CHECK_NEAR((mi.get_joint_positions(robot.joint_names) - b1_q_home()).norm(), 0.0);
         CHECK_NEAR(mi.get_base_pose(robot.floating_base).translation().q(3), 0.615);
     }
-    CHECK(position.model.name == "b1.xml");
-    CHECK(torque.model.name == "b1_torque.xml");
 
-    // With position actuators, it stands at home; with torque motors and no torques, it falls
-    for (const bool& with_position_actuators : {true, false})
+    // After 3 s at home, with constant commands (those of the keyframe): with position actuators, it
+    // stands; with velocity actuators at zero velocity, it sinks slowly; with no torques, it falls
+    auto height_after_3s = [](const DQ_MujocoRobotDescription& b1, const std::function<void(DQ_MujocoInterface&,
+                                                                                         const DQ_MujocoRobotDescription&)>& control)
     {
         DQ_MujocoInterface mi(HEADLESS);
-        const DQ_MujocoRobotDescription robot = load_on_a_floor(mi, with_position_actuators ? position : torque);
+        const DQ_MujocoRobotDescription robot = load_on_a_floor(mi, b1);
         mi.reset_simulation("home");
         for (int i = 0; i < 1500; i++)
+        {
+            control(mi, robot);
             mi.trigger_next_simulation_step();
-        const double height = mi.get_base_pose(robot.floating_base).translation().q(3);
-        if (with_position_actuators)
-        {
-            CHECK(height > 0.58 && height < 0.62);
-            CHECK((mi.get_joint_positions(robot.joint_names) - b1_q_home()).norm() < 0.1);
-            CHECK(mi.get_joint_velocities(robot.joint_names).norm() < 1e-2);
         }
-        else
-        {
-            CHECK(height < 0.3);
-        }
-    }
+        return mi.get_base_pose(robot.floating_base).translation().q(3);
+    };
+    auto keep = [](DQ_MujocoInterface&, const DQ_MujocoRobotDescription&) {};
+    const double position_height = height_after_3s(position, keep);
+    const double velocity_height = height_after_3s(velocity, keep);
+    const double torque_height = height_after_3s(torque, keep);
+    CHECK(position_height > 0.58 && position_height < 0.62);
+    CHECK(velocity_height > 0.45 && velocity_height < 0.58);
+    CHECK(torque_height < 0.3);
 
-    // With torque motors, the torques hold it: a PD controller on the home configuration
-    DQ_MujocoInterface mi(HEADLESS);
-    const DQ_MujocoRobotDescription robot = load_on_a_floor(mi, torque);
-    mi.reset_simulation("home");
-    for (int i = 0; i < 1500; i++)
-    {
-        const VectorXd q = mi.get_joint_positions(robot.joint_names);
-        const VectorXd q_dot = mi.get_joint_velocities(robot.joint_names);
-        mi.set_joint_target_forces(robot.joint_names, 1000*(b1_q_home() - q) - 30*q_dot);
-        mi.trigger_next_simulation_step();
-    }
-    CHECK(mi.get_base_pose(robot.floating_base).translation().q(3) > 0.58);
+    // Each kind of actuator holds it with its own command: velocities of a proportional controller,
+    // and torques of a PD controller, on the home configuration
+    CHECK(height_after_3s(velocity, [](DQ_MujocoInterface& mi, const DQ_MujocoRobotDescription& robot) {
+              mi.set_joint_target_velocities(robot.joint_names, 10*(b1_q_home() - mi.get_joint_positions(robot.joint_names)));
+          }) > 0.59);
+    CHECK(height_after_3s(torque, [](DQ_MujocoInterface& mi, const DQ_MujocoRobotDescription& robot) {
+              const VectorXd q = mi.get_joint_positions(robot.joint_names);
+              const VectorXd q_dot = mi.get_joint_velocities(robot.joint_names);
+              mi.set_joint_target_forces(robot.joint_names, 1000*(b1_q_home() - q) - 30*q_dot);
+          }) > 0.58);
 }
 
 static void unitree_b1_kinematics()

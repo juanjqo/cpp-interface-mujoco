@@ -53,7 +53,7 @@ int main()
     std::signal(SIGINT, sig_int_handler);
 
     //--------------------------------------------------------------------------------------------
-    // The scene: a B1 with position actuators (UnitreeB1Robot::ACTUATORS::TORQUE for torque motors)
+    // The scene: a B1 with position actuators (or ACTUATORS::VELOCITY or ACTUATORS::TORQUE)
     //--------------------------------------------------------------------------------------------
     DQ_MujocoSceneBuilder scene("Unitree B1");
     scene.add_floor();

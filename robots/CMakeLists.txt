@@ -46,15 +46,15 @@ dq_mujoco_embed_model(${ROBOTS_TARGET}
     DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/models/generic_quadruped
     MAIN      generic_quadruped.xml
 )
-# The B1 with position actuators, and with torque motors (b1_torque.xml, as one more asset), sharing
-# the robot (b1_robot.xml) and the meshes
+# The B1 with position actuators, and with velocity actuators and torque motors (b1_velocity.xml and
+# b1_torque.xml, as more assets), sharing the robot (b1_robot.xml) and the meshes
 file(GLOB unitree_b1_meshes RELATIVE ${MODELS_DIR}/unitree_b1
      CONFIGURE_DEPENDS ${MODELS_DIR}/unitree_b1/assets/*.obj)
 dq_mujoco_embed_model(${ROBOTS_TARGET}
     FUNCTION  unitree_b1
     DIRECTORY ${MODELS_DIR}/unitree_b1
     MAIN      b1.xml
-    ASSETS    b1_torque.xml b1_robot.xml ${unitree_b1_meshes}
+    ASSETS    b1_velocity.xml b1_torque.xml b1_robot.xml ${unitree_b1_meshes}
 )
 # The Z1 with its gripper, and without it (z1.xml, as one more asset), sharing the meshes
 file(GLOB unitree_z1_meshes RELATIVE ${MODELS_DIR}/unitree_z1

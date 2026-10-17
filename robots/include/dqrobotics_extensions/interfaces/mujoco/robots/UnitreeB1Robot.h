@@ -17,8 +17,8 @@ namespace DQ_robotics_extensions
 {
 
 /**
- * @brief The Unitree B1, a quadruped with 3 joints per leg, with position actuators or torque
- *        motors.
+ * @brief The Unitree B1, a quadruped with 3 joints per leg, with position actuators, velocity
+ *        actuators or torque motors.
  *
  * The MuJoCo model is the unitree_b1 model of cpp-interface-mujoco-models (BSD-3-Clause, Unitree
  * Robotics), with its meshes embedded in the library.
@@ -26,12 +26,16 @@ namespace DQ_robotics_extensions
  * - Floating base: the body "base".
  * - Joints, in the order of the actuators: FL_hip_joint (about x: abduction), FL_thigh_joint (about
  *   y), FL_calf_joint (about y), then FR_, RL_ and RR_ (front/rear, left/right).
- * - Actuators (ACTUATORS::POSITION, the default): position actuators, ctrl is the joint position.
- *   ACTUATORS::TORQUE: torque motors, ctrl is the joint torque; without a controller, the robot
- *   falls. Both within the torque limits of the joints (91, 93.33 and 140 N·m).
+ * - Actuators, all within the torque limits of the joints (91, 93.33 and 140 N·m):
+ *   ACTUATORS::POSITION (default): position actuators, for set_joint_target_positions().
+ *   ACTUATORS::VELOCITY: velocity actuators, for set_joint_target_velocities(), within the velocity
+ *   limits of the joints (19.69, 23.32 and 15.55 rad/s). With zero velocities, the robot sinks slowly.
+ *   ACTUATORS::TORQUE: torque motors, for set_joint_target_forces(). Without a controller, the
+ *   robot falls.
  * - Feet: the sites FL_foot, FR_foot, RL_foot, RR_foot.
  * - Keyframe "home": standing, each leg at (hip, thigh, calf) = (0, 0.7, -1.2), with the
- *   actuators holding the pose (ACTUATORS::POSITION) or at zero torque (ACTUATORS::TORQUE).
+ *   actuators holding the pose (ACTUATORS::POSITION), at zero velocity (ACTUATORS::VELOCITY) or at
+ *   zero torque (ACTUATORS::TORQUE).
  * - kinematics(): the DQ Robotics models of the legs, in the frame of the base.
  *
  * Example:
@@ -57,6 +61,7 @@ public:
     enum class ACTUATORS
     {
         POSITION,
+        VELOCITY,
         TORQUE
     };
 

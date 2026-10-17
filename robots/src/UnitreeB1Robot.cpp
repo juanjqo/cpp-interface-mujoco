@@ -14,8 +14,9 @@ namespace DQ_robotics_extensions
 {
 
 // Generated from cpp-interface-mujoco-models/unitree_b1 by dq_mujoco_embed_model (see
-// robots/CMakeLists.txt): the model with position actuators, b1.xml, with the model with torque
-// motors, b1_torque.xml, as one more asset, so that both share the robot (b1_robot.xml) and the meshes
+// robots/CMakeLists.txt): the model with position actuators, b1.xml, with the models with velocity
+// actuators and torque motors, b1_velocity.xml and b1_torque.xml, as more assets, so that all of them
+// share the robot (b1_robot.xml) and the meshes
 namespace embedded_models
 {
 DQ_MujocoModel unitree_b1();
@@ -23,19 +24,23 @@ DQ_MujocoModel unitree_b1();
 
 /**
  * @brief The MuJoCo model of the Unitree B1 and the names needed to use it.
- * @param actuators ACTUATORS::POSITION (default) or ACTUATORS::TORQUE.
+ * @param actuators ACTUATORS::POSITION (default), ACTUATORS::VELOCITY or ACTUATORS::TORQUE.
  * @return The description. Its model is embedded in the library, so no files are needed.
  */
 DQ_MujocoRobotDescription UnitreeB1Robot::description(const ACTUATORS& actuators)
 {
     DQ_MujocoModel model = embedded_models::unitree_b1();
-    const auto torque = model.assets.find("b1_torque.xml");
-    if (actuators == ACTUATORS::TORQUE)
+    for (const auto& [variant, file] : {std::make_pair(ACTUATORS::VELOCITY, "b1_velocity.xml"),
+                                        std::make_pair(ACTUATORS::TORQUE, "b1_torque.xml")})
     {
-        model.name = "b1_torque.xml";
-        model.xml.assign(torque->second.begin(), torque->second.end());
+        const auto it = model.assets.find(file);
+        if (actuators == variant)
+        {
+            model.name = file;
+            model.xml.assign(it->second.begin(), it->second.end());
+        }
+        model.assets.erase(it);
     }
-    model.assets.erase(torque);
 
     DQ_MujocoRobotDescription robot;
     robot.model = std::move(model);
