@@ -640,10 +640,15 @@ but not drawn.
 
 ## License
 
-Copyright (C) 2025-2026 Juan Jose Quiroz Omana. Licensed under the [LGPL-3.0-or-later](LICENSE).
+Copyright (C) 2025-2026 Juan Jose Quiroz Omana. Licensed under the [LGPL-3.0-or-later](LICENSE), which supplements
+the [GPL-3.0](COPYING).
 
 This project uses [DQ Robotics](https://github.com/dqrobotics/cpp) (LGPL-3.0-or-later) but is not part of the DQ
 Robotics project. It also uses [MuJoCo](https://github.com/google-deepmind/mujoco) (Apache-2.0), which is downloaded at
 build time and installed with the library; the mouse and scroll handling of the viewer is adapted from MuJoCo's
 `sample/basic.cc`. Its threads are run by [sas_cpp](https://github.com/MarinhoLab/sas_cpp) (LGPL-3.0), which prints
 its license notice when a thread is created.
+
+The installation includes the licenses, in `share/doc/dqrobotics-interface-mujoco`: those of this library, and those
+of MuJoCo and of the libraries built into it (`third_party/`: libccd, LodePNG, MarchingCubeCpp, miniz, Qhull,
+tinyobjloader and TinyXML-2).

@@ -110,6 +110,28 @@ install(TARGETS ${PROJECT_NAME}
 )
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
+# The licenses, with the documentation: this library's (LICENSE, the LGPL-3.0, and COPYING, the GPL-3.0
+# that it supplements), and those of MuJoCo (Apache-2.0), which is installed with this library, and
+# of the libraries built into it. Licenses of sources that were not fetched (e.g., a MuJoCo found on
+# the system) are skipped.
+install(FILES LICENSE COPYING DESTINATION ${CMAKE_INSTALL_DOCDIR})
+set(BUNDLED_LICENSES  # <fetched dependency> <its license file>
+    mujoco          LICENSE
+    ccd             BSD-LICENSE
+    lodepng         LICENSE
+    marchingcubecpp README.md      # public domain or MIT, as stated in its README
+    miniz           LICENSE
+    qhull           COPYING.txt
+    tinyobjloader   LICENSE
+    tinyxml2        LICENSE.txt)
+while(BUNDLED_LICENSES)
+    list(POP_FRONT BUNDLED_LICENSES dependency license_file)
+    FetchContent_GetProperties(${dependency} SOURCE_DIR source_dir)
+    if(source_dir AND EXISTS ${source_dir}/${license_file})
+        install(FILES ${source_dir}/${license_file} DESTINATION ${CMAKE_INSTALL_DOCDIR}/third_party/${dependency})
+    endif()
+endwhile()
+
 # Generic robots library: dqrobotics_extensions::interface-mujoco-generic-robots (same export set)
 if(DQ_MUJOCO_BUILD_ROBOTS)
     add_subdirectory(robots)
