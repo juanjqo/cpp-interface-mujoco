@@ -76,6 +76,9 @@ set(TESTS
     sensors_of_a_model
     scene_builder_sensors
     edit_scene_sensors_while_running
+    cameras_headless
+    cameras_while_running
+    camera_in_window_mode
     scene_builder_robot_with_meshes
     edit_scene_robot_with_meshes
 )

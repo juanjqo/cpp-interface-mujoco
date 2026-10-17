@@ -12,6 +12,7 @@ It uses DQ Robotics (https://dqrobotics.github.io) but is not part of DQ Robotic
 #include <dqrobotics/DQ.h>
 #include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoModel.h>
 #include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoSceneBuilder.h>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -44,6 +45,34 @@ public:
     {
         BODY_FRAME,
         WORLD_FRAME
+    };
+
+    /**
+     * @brief How a camera renders its images (see start_camera()).
+     *  FULL: as the viewer, with shadows, reflections and the skybox.
+     *  FAST: without them: about 2 times faster on a GPU, and 3 times faster with software rendering.
+     */
+    enum class CAMERA_QUALITY
+    {
+        FULL,
+        FAST
+    };
+
+    /**
+     * @brief An image of a camera (see get_camera_image()).
+     *
+     * The layout is that of a ROS sensor_msgs/Image with encoding "rgb8" (and "32FC1" for the depth):
+     * rows from top to bottom, pixels from left to right.
+     */
+    struct CameraImage
+    {
+        int width = 0;
+        int height = 0;
+        std::vector<std::uint8_t> rgb;  ///< 3*width*height bytes: R, G, B of each pixel
+        std::vector<float> depth;       ///< width*height distances in meters along the optical axis
+                                        ///< (empty if the camera was started without depth)
+        double time = 0;                ///< simulation time of the state in the image, in seconds
+        std::uint64_t count = 0;        ///< images rendered by the camera so far (a new image has a new count)
     };
 
     /**
@@ -138,6 +167,17 @@ public:
     DQ_robotics::DQ get_wrench(const std::string& sitename) const;                   // f + E_*tau
     double          get_touch(const std::string& sitename) const;                    // normal force
     double          get_range(const std::string& sitename) const;                    // distance, -1: none
+
+    // Cameras (MuJoCo <camera> elements, or added with DQ_MujocoSceneBuilder::add_camera()): rendered
+    // offscreen by a camera thread, each at its own rate, in WINDOW and HEADLESS mode. Start and stop
+    // them from the main thread; read their images from any thread.
+    std::vector<std::string> get_camera_names() const;
+    void start_camera(const std::string& cameraname,
+                      const double& rate_hz = 30.0,
+                      const bool& with_depth = false,
+                      const CAMERA_QUALITY& quality = CAMERA_QUALITY::FULL);
+    void stop_camera(const std::string& cameraname);
+    CameraImage get_camera_image(const std::string& cameraname) const;
 
     // Reference frames: created at runtime and only drawn in the viewer (no XML, no physics)
     void add_reference_frame(const std::string& name,

@@ -13,6 +13,7 @@ Copyright 2021 DeepMind Technologies Limited, licensed under the Apache License,
 #include <chrono>
 #include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h>
 #include "DQ_MujocoSceneBuilderImpl.h"
+#include "DQ_MujocoCameras.h"
 #include <set>
 #include <unordered_map>
 #include <mutex>
@@ -20,6 +21,7 @@ Copyright 2021 DeepMind Technologies Limited, licensed under the Apache License,
 #include <atomic>
 #include <cstring>
 #include <limits>
+#include <iostream>
 #include <map>
 #include <thread>
 #include "mujoco/mujoco.h"
@@ -162,6 +164,10 @@ public:
     std::atomic<int> framebuffer_height_{0};
     steady_clock::time_point last_event_poll_;
 
+    // Camera thread (from the first start_camera() on): renders the cameras offscreen, with its own
+    // OpenGL context. Its lock order: it takes physics_mutex_ to copy the state.
+    std::unique_ptr<CameraRenderer> cameras_;
+
 public:
     std::string xml_model_;
     bool model_loaded_{false};
@@ -261,6 +267,7 @@ public:
         // stop the threads before anything they use is freed
         _stop_simulation();
         physics_thread_.reset();
+        cameras_.reset();
 
         // free visualization storage while the window (and its OpenGL context) still exists
         _free_visualization();
@@ -407,9 +414,11 @@ public:
             throw std::runtime_error("Failed to allocate the data for the xml model \"" + xml_model + "\"");
         }
 
-        // The new model is valid: stop the threads and release the previous one, if any
+        // The new model is valid: stop the threads and release the previous one, if any (the
+        // cameras of the previous model are stopped)
         _stop_simulation();
         physics_thread_.reset();  // its period depends on the timestep of the model
+        cameras_.reset();
         model_loaded_ = false;
         _free_visualization();
         if (snapshot_) mj_deleteData(snapshot_);
@@ -2438,6 +2447,81 @@ double DQ_MujocoInterface::get_range(const std::string& sitename) const
 
 
 /**
+ * @brief The names of the cameras of the model (MuJoCo <camera> elements, and the cameras added
+ *        with DQ_MujocoSceneBuilder::add_camera()), in the order of the model.
+ */
+std::vector<std::string> DQ_MujocoInterface::get_camera_names() const
+{
+    _check_model();
+    std::vector<std::string> names;
+    for (int c = 0; c < impl_->m_->ncam; c++)
+        if (const char* name = mj_id2name(impl_->m_, mjOBJ_CAMERA, c))
+            names.push_back(name);
+    return names;
+}
+
+/**
+ * @brief Start rendering a camera: a camera thread renders its images offscreen, at its rate, and
+ *        get_camera_image() returns the latest one. Starting it again changes its settings.
+ * @param cameraname Name of a camera of the model (see get_camera_names()).
+ * @param rate_hz Images per second (in wall-clock time), at most 500. If the computer cannot render
+ *        them that fast, images are skipped: the count of the images tells how many were rendered.
+ * @param with_depth Also read the depth of each pixel, as distances in meters.
+ * @param quality FULL (as the viewer, the default) or FAST (without shadows, reflections and skybox).
+ *
+ * The size of the images is the resolution of the camera in the model (set by add_camera(), or the
+ * resolution attribute of a <camera>), or 640x480 if it has none. A camera looks along the -z axis
+ * of its frame, with x to the right of the image and y up, and its fovy is the vertical field of view.
+ *
+ * The camera thread has its own OpenGL context: a hidden window in WINDOW mode, and EGL in HEADLESS
+ * mode (no display needed; it needs a library built with EGL). It holds the physics lock only to
+ * copy the state (a few microseconds), so the cameras do not delay the simulation. Call it from the
+ * main thread (the one that loaded the model).
+ *
+ * @throws std::invalid_argument If there is no such camera, or the rate is not in (0, 500]
+ * @throws std::runtime_error If the OpenGL context of the cameras cannot be created (e.g., HEADLESS
+ *         mode without EGL)
+ */
+void DQ_MujocoInterface::start_camera(const std::string& cameraname, const double& rate_hz, const bool& with_depth,
+                                      const CAMERA_QUALITY& quality)
+{
+    _check_model();
+    if (!impl_->cameras_)
+        impl_->cameras_ = std::make_unique<CameraRenderer>(impl_->rendering_ == RENDERING::WINDOW, impl_->m_,
+                                                           impl_->d_, impl_->physics_mutex_);
+    impl_->cameras_->start_camera(cameraname, rate_hz, with_depth, quality);
+}
+
+/**
+ * @brief Stop rendering a camera (its last image is discarded). Call it from the main thread.
+ * @throws std::invalid_argument If the camera is not started
+ */
+void DQ_MujocoInterface::stop_camera(const std::string& cameraname)
+{
+    _check_model();
+    if (!impl_->cameras_)
+        throw std::invalid_argument(error_msg_layout_ + "stop_camera. The camera \"" + cameraname
+                                    + "\" is not started.");
+    impl_->cameras_->stop_camera(cameraname);
+}
+
+/**
+ * @brief The latest image of a started camera, also while the simulation runs
+ * @return The image: rgb (and depth) with rows from top to bottom, as a ROS sensor_msgs/Image; the
+ *         simulation time of the state it shows; and its count (zero before the first image). Read
+ *         it again when the count changes, e.g., to publish each image once.
+ * @throws std::runtime_error If the camera is not started
+ */
+DQ_MujocoInterface::CameraImage DQ_MujocoInterface::get_camera_image(const std::string& cameraname) const
+{
+    _check_model();
+    if (!impl_->cameras_)
+        throw std::runtime_error(error_msg_layout_ + "get_camera_image. The camera \"" + cameraname
+                                 + "\" is not started (start_camera()).");
+    return impl_->cameras_->get_image(cameraname);
+}
+
+/**
  * @brief Add a reference frame that is drawn in the viewer
  * @param name Unique name of the frame. It is also shown as a label at its origin.
  * @param axis_length Length of each axis arrow in meters.
@@ -2915,30 +2999,46 @@ void DQ_MujocoInterface::edit_scene(const std::function<void(DQ_MujocoSceneBuild
 
         // Pause only what must be paused (and continue at the end, also if it fails): the viewer
         // if the GPU context must be rebuilt, the physics thread if its period (the timestep)
-        // changes. Otherwise the threads only wait for the locks while the model is recompiled.
+        // changes, and the cameras (their scenes are remade). Otherwise the threads only wait for
+        // the locks while the model is recompiled.
         const mjModel* c = check.model;
         const mjModel* m = impl.m_;
-        const bool rebuild_gpu_context = impl.window_
-            && (c->ntex != m->ntex || c->nmesh != m->nmesh || c->nhfield != m->nhfield
-                || c->nskin != m->nskin || c->nflex != m->nflex);
+        const bool gpu_resources_change = c->ntex != m->ntex || c->nmesh != m->nmesh || c->nhfield != m->nhfield
+                                          || c->nskin != m->nskin || c->nflex != m->nflex;
+        const bool rebuild_gpu_context = impl.window_ && gpu_resources_change;
         const bool restart_physics = impl.simulation_running_ && c->opt.timestep != m->opt.timestep;
         if (restart_physics)
             impl._stop_simulation(true);
         if (rebuild_gpu_context)
             impl._stop_viewer();  // the OpenGL context is now current in this thread
+        if (impl.cameras_)
+            impl.cameras_->pause();
         struct Resume
         {
             Impl& impl;
             bool viewer;
             bool physics;
+            bool camera_gpu_resources;
             ~Resume()
             {
+                if (impl.cameras_)
+                {
+                    try
+                    {
+                        impl.cameras_->model_changed(camera_gpu_resources);
+                    }
+                    catch (const std::exception& e)
+                    {
+                        std::cerr << "DQ_MujocoInterface::edit_scene: the cameras could not be updated: "
+                                  << e.what() << std::endl;
+                    }
+                }
                 if (viewer)
                     impl._start_viewer();
                 if (physics)
                     impl._start_simulation(true);
             }
-        } resume{impl, rebuild_gpu_context, restart_physics};
+        } resume{impl, rebuild_gpu_context, restart_physics, gpu_resources_change};
 
         impl.recompile(*scene.impl_, rebuild_gpu_context);
     }

@@ -68,6 +68,7 @@ include(GNUInstallDirs)
 add_library(${PROJECT_NAME}
     src/dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.cpp
     src/dqrobotics_extensions/interfaces/mujoco/DQ_MujocoSceneBuilder.cpp
+    src/dqrobotics_extensions/interfaces/mujoco/DQ_MujocoCameras.cpp
 )
 add_library(dqrobotics_extensions::interface-mujoco ALIAS ${PROJECT_NAME})
 set_target_properties(${PROJECT_NAME} PROPERTIES EXPORT_NAME interface-mujoco)
@@ -88,6 +89,10 @@ target_link_libraries(${PROJECT_NAME}
     marinholab::sas::core
     ${TOOL_LIBS}
 )
+
+if(DQ_MUJOCO_HAS_EGL)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE DQ_MUJOCO_HAS_EGL)
+endif()
 
 # Find the MuJoCo library installed next to this one
 if(APPLE)

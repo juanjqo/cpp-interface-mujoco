@@ -21,6 +21,8 @@ DQ Robotics can drive a MuJoCo simulation using joint names and dual-quaternion 
   make the camera follow the robot
 - Sensors: IMUs, force/torque sensors, touch sensors, rangefinders, and any MuJoCo sensor, read as DQ Robotics types
   (orientations, wrenches), also while the simulation runs; add them to scenes in code
+- Cameras: render cameras offscreen at their own rates, with RGB and depth, in WINDOW and HEADLESS mode (EGL), as
+  images with the layout of a ROS `sensor_msgs/Image`; add them to scenes in code, on robots or in the world
 - Reference frames: draw named frames at runtime from dual quaternion poses, without editing the XML model
 - Visualization toggles: wireframe, joint axes, contact forces, center of mass, site frames
 - Simulation reset, to the initial configuration or to a keyframe of the model
@@ -45,14 +47,15 @@ DQ Robotics can drive a MuJoCo simulation using joint names and dual-quaternion 
 | Dependency | How it is obtained |
 |---|---|
 | [MuJoCo](https://github.com/google-deepmind/mujoco) 3.16.0 | Downloaded and built automatically by CMake (`FetchContent`), and installed together with this library |
-| [sas_cpp](https://github.com/MarinhoLab/sas_cpp) (`marinholab_sas_core`) | Its `ThreadManager` runs the physics and viewer threads. The installed package is used if found (`libmarinholab-sas-core` from the SmartArmStack apt repository); otherwise it is downloaded and built automatically, and installed together with this library |
+| [sas_cpp](https://github.com/MarinhoLab/sas_cpp) (`marinholab_sas_core`) | Its `ThreadManager` runs the physics, viewer and camera threads. The installed package is used if found (`libmarinholab-sas-core` from the SmartArmStack apt repository); otherwise it is downloaded and built automatically, and installed together with this library |
 | [DQ Robotics C++](https://github.com/dqrobotics/cpp) | Install manually (see below) |
 | Eigen3, GLFW, OpenGL | System packages |
+| EGL (optional, Linux) | System package. It renders the cameras in HEADLESS mode (no display needed); without it, cameras need WINDOW mode |
 
 Ubuntu:
 
 ```shell
-sudo apt install build-essential cmake git libeigen3-dev libglfw3-dev libgl1-mesa-dev
+sudo apt install build-essential cmake git libeigen3-dev libglfw3-dev libgl1-mesa-dev libegl-dev
 sudo add-apt-repository ppa:dqrobotics-dev/development
 sudo apt update && sudo apt install libdqrobotics
 ```
@@ -150,6 +153,7 @@ cd ~/git/cpp-interface-mujoco/build/examples
 | [`reference_frames`](examples/reference_frames.cpp) | Draws desired, measured and fixed reference frames, plus a trail of past poses created and removed on the fly |
 | [`floating_base`](examples/floating_base.cpp) | A quadruped starts from its `home` keyframe, rocks its trunk with the leg actuators and gets pushed with `set_base_twist`; the camera follows it |
 | [`sensors`](examples/sensors.cpp) | Reads sensors in real time: the IMU of a quadruped, touch sensors on its feet and a rangefinder under its trunk while it bobs up and down, and a force/torque sensor on the wrist of an arm |
+| [`cameras`](examples/cameras.cpp) | Renders two cameras while the simulation runs: one on the trunk of a quadruped (RGB and depth, 30 Hz) and one fixed in the world (FAST quality, 10 Hz); writes their latest images to PPM files once per second. Also in HEADLESS mode (`./cameras headless`) |
 | [`scene_builder`](examples/scene_builder.cpp) | Builds a scene in code (a table, two quadrupeds, an arm and a kinematic block moved with `set_body_pose`) and edits it while it runs in real time: a ball is dropped every 2 s and the oldest is removed; the arm's kinematics, moved to where it was placed, are drawn on its end effector |
 | [`twist_open_loop`](examples/twist_open_loop.cpp) | Stepped simulation paced by a sas `Clock`: commands a floating box with constant twists (no feedback) in `WORLD_FRAME` and `BODY_FRAME`, before every step: rise, orbit the world z axis, spin in place, drive in a circle, descend |
 
@@ -325,6 +329,44 @@ scene.remove("trunk_imu");                                                     /
 
 Robots can have sensors in their models: the IMU of a robot is in `imu_site` of its description (e.g., the generic
 quadruped has one, prefixed by `add_robot()`: `"dog_imu"`).
+
+### Cameras
+
+Cameras (MuJoCo [`<camera>`](https://mujoco.readthedocs.io/en/stable/XMLreference.html#body-camera) elements, or added
+with the scene builder) are rendered offscreen by a camera thread, each at its own rate, while the simulation runs or
+not, in WINDOW and HEADLESS mode:
+
+```cpp
+scene.add_camera("head", DQ_MujocoSceneBuilder::look_at(0.2*i_ + 0.05*k_, 1.0*i_), "dog_trunk",
+                 60, 640, 480);                              // pose, parent body, fovy (degrees), resolution
+...
+mi.start_camera("head", 30.0, true);                         // 30 images per second, with depth
+DQ_MujocoInterface::CameraImage image = mi.get_camera_image("head");
+// image.width, image.height
+// image.rgb:   3*width*height bytes (R, G, B), rows from top to bottom
+// image.depth: width*height distances in meters along the optical axis (if started with depth)
+// image.time:  simulation time of the state in the image
+// image.count: images rendered so far (read the image again when it changes)
+mi.stop_camera("head");
+```
+
+- **Layout:** the images have the layout of a ROS `sensor_msgs/Image` (encoding `rgb8`, and `32FC1` for the depth), so
+  a ROS driver can publish them as they are, stamped with their simulation time, when their count changes.
+- **Frame:** a camera looks along the -z axis of its pose, with x to the right of the image and y up (MuJoCo's
+  convention). `DQ_MujocoSceneBuilder::look_at(position, target, up)` gives such a pose. The ROS optical frame
+  (z forward, x right, y down) is `pose*i_`. The resolution is that of the camera (`add_camera()`, or the `resolution`
+  attribute of a `<camera>`), or 640x480 if it has none.
+- **Quality:** `CAMERA_QUALITY::FULL` (default) renders as the viewer, with shadows, reflections and the skybox;
+  `CAMERA_QUALITY::FAST` renders without them, about 2 times faster on a GPU and 3 times faster with software
+  rendering.
+- **Performance:** the camera thread holds the physics lock only to copy the state (a few microseconds), so cameras
+  do not delay the simulation. On a GPU an image takes about 1 ms (640x480, with depth), almost whatever its
+  resolution; with software rendering, tens of milliseconds. If an image is not ready in time, it is skipped (the
+  count tells how many were rendered).
+- **OpenGL context:** the camera thread has its own: a hidden window in WINDOW mode, and EGL in HEADLESS mode (on a GPU,
+  or with Mesa's software rendering; no display needed). HEADLESS cameras need a library built with EGL.
+- Start and stop cameras from the main thread; read their images from any thread. Cameras keep running across
+  `edit_scene()`, and a camera removed from the scene is stopped. Loading another model stops all the cameras.
 
 ### Floating-base robots
 
@@ -611,6 +653,9 @@ but not drawn.
 | `get_site_pose(name)` / `set_site_pose(name, x)` | Site pose as a unit dual quaternion |
 | `get_sensor_names()` / `get_sensor_data(name)` | Names of the sensors / values of any sensor, by name |
 | `get_imu_orientation/angular_velocity/linear_acceleration(site)` | An IMU, by its site: unit quaternion, and angular velocity and linear acceleration in its frame |
+| `get_camera_names()` | Names of the cameras of the model |
+| `start_camera(name, rate, with_depth, quality)` / `stop_camera(name)` | Render a camera offscreen, at its rate (also in HEADLESS mode) / stop it |
+| `get_camera_image(name)` | The latest image: RGB (and depth), rows from top to bottom, with its simulation time and count |
 | `get_wrench(site)` / `get_touch(site)` / `get_range(site)` | A force/torque sensor (`f + E_*tau`, in its frame), a touch sensor (N), a rangefinder (m, -1: nothing) |
 | `get_body_pose(name)` / `set_body_pose(name, x)` | Body pose as a unit dual quaternion / move a `KINEMATIC` body (a MuJoCo mocap body) |
 | `get_floating_base_names()` | Bodies with a free joint |
@@ -633,9 +678,11 @@ but not drawn.
 | `add_site(name, x, size, rgba)` | A site in the world (a frame without physics) |
 | `add_imu(name, x, parent)` / `add_rangefinder(name, x, parent)` | An IMU / a rangefinder (along its z axis), on a body (or in the world) |
 | `add_force_torque_sensor(name, x, body)` | A force/torque sensor on a body, which measures the wrench from its parent body |
+| `add_camera(name, x, parent, fovy, width, height)` | A camera on a body (or in the world), looking along the -z axis of its pose |
+| `look_at(position, target, up)` | (static) The pose of a camera at `position` that looks at `target` |
 | `add_touch_sensor(name, x, half_sizes, parent)` | A touch sensor: the normal force of the contacts inside a box, on a body (or in the world) |
 | `add_robot(robot, prefix, x, parent)` | A robot (e.g., of the robots library), placed at `x` in the world, or mounted at `x` on the body `parent`; returns its description in the scene |
-| `remove(name)` | Remove an object, site, sensor (by its site), light, the floor, or a robot (by its prefixed root body) |
+| `remove(name)` | Remove an object, site, sensor (by its site), camera, light, the floor, or a robot (by its prefixed root body) |
 | `build()` | The scene as a `DQ_MujocoModel`, with a "home" keyframe |
 
 ## License

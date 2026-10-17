@@ -27,6 +27,7 @@ xvfb-run.
 #include "dqrobotics_extensions/interfaces/mujoco/robots/GenericManipulatorRobot.h"
 #include "dqrobotics_extensions/interfaces/mujoco/robots/GenericQuadrupedRobot.h"
 #include <GLFW/glfw3.h>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -1295,6 +1296,200 @@ static void edit_scene_sensors_while_running()
     CHECK(std::abs(total - 8.875*9.81) < 5);  // the weight of the robot (8.875 kg), in N
 }
 
+/*********************************************
+ * CAMERAS
+ * *******************************************/
+
+// A camera 1 m above the ground (at x = 0) that looks along x, 160x120 pixels, 60 degrees of vertical
+// field of view; a red box whose front face is 1.8 m away, in the middle of the image; and a green box
+// above it, in the upper part of the image. No floor: the background is the sky.
+static void add_camera_test_objects(DQ_MujocoSceneBuilder& builder)
+{
+    builder.add_box("red", 1 + 0.5*E_*(2.0*i_ + 1.0*k_), {0.2, 0.2, 0.2}, BODY::FIXED, {1, 0, 0, 1});
+    builder.add_box("green", 1 + 0.5*E_*(2.0*i_ + 1.7*k_), {0.2, 0.2, 0.15}, BODY::FIXED, {0, 1, 0, 1});
+}
+
+static std::array<int, 3> pixel(const DQ_MujocoInterface::CameraImage& image, const int& row, const int& col)
+{
+    const int k = 3*(image.width*row + col);
+    return {image.rgb.at(k), image.rgb.at(k + 1), image.rgb.at(k + 2)};
+}
+
+static bool is_red(const std::array<int, 3>& p)
+{
+    return p[0] > 80 && p[0] > 2*p[1] && p[0] > 2*p[2];
+}
+
+static bool is_green(const std::array<int, 3>& p)
+{
+    return p[1] > 80 && p[1] > 2*p[0] && p[1] > 2*p[2];
+}
+
+// Waits until the camera has rendered images up to count (the camera thread renders them)
+static DQ_MujocoInterface::CameraImage wait_for_image(const DQ_MujocoInterface& mi, const std::string& camera,
+                                                      const std::uint64_t& count)
+{
+    const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < end)
+    {
+        mi.should_close_window();  // a main loop (WINDOW mode)
+        const auto image = mi.get_camera_image(camera);
+        if (image.count >= count)
+            return image;
+        sleep_for(0.005);
+    }
+    throw std::runtime_error("No image of the camera \"" + camera + "\" after 5 s");
+}
+
+// The image of the test objects, from the camera 1 m above the ground at x = x_camera
+static void check_test_image(const DQ_MujocoInterface::CameraImage& image, const double& x_camera = 0.0)
+{
+    CHECK(image.width == 160 && image.height == 120);
+    CHECK(image.rgb.size() == 3*160*120);
+    // The green box is 0.7 m above the line of sight, at the distance of the red box: rows go from top
+    // to bottom, and tan(30 degrees) is half the height of the image
+    const int green_row = static_cast<int>(std::round(60 - 60*(0.7/(1.8 - x_camera))/std::tan(M_PI/6)));
+    CHECK(is_red(pixel(image, 60, 80)));                   // the center of the image
+    CHECK(is_green(pixel(image, green_row, 80)));          // above
+    CHECK(!is_green(pixel(image, 120 - green_row, 80)));   // not below
+    if (!image.depth.empty())
+    {
+        CHECK(image.depth.size() == 160*120);
+        CHECK(std::abs(image.depth.at(160*60 + 80) - (1.8 - x_camera)) < 0.01);  // the front face of the red box
+        CHECK(image.depth.at(0) > 10);                                             // the sky
+    }
+}
+
+static void cameras_headless()
+{
+    // look_at: the camera looks along the -z axis of its pose
+    const DQ x_camera = DQ_MujocoSceneBuilder::look_at(1.0*k_, 2.0*i_ + 1.0*k_);
+    CHECK(error_of(x_camera.P()*(-1.0*k_)*conj(x_camera.P()) - 1.0*i_) < 1e-9);
+    CHECK(error_of(x_camera.P()*j_*conj(x_camera.P()) - 1.0*k_) < 1e-9);  // up in the image
+    CHECK(error_of(x_camera.translation() - 1.0*k_) < 1e-9);
+    CHECK_THROWS(std::invalid_argument, DQ_MujocoSceneBuilder::look_at(1.0*k_, 1.0*k_));
+    CHECK_THROWS(std::invalid_argument, DQ_MujocoSceneBuilder::look_at(DQ(0), 2.0*k_));  // up along the sight
+
+    DQ_MujocoSceneBuilder builder;
+    add_camera_test_objects(builder);
+    builder.add_camera("cam", x_camera, "", 60, 160, 120);
+    CHECK_THROWS(std::invalid_argument, builder.add_camera("cam", x_camera));                 // name in use
+    CHECK_THROWS(std::invalid_argument, builder.add_camera("cam2", x_camera, "", 0));         // field of view
+    CHECK_THROWS(std::invalid_argument, builder.add_camera("cam2", x_camera, "unknown"));
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(builder.build());
+    CHECK(mi.get_camera_names() == std::vector<std::string>{"cam"});
+
+    // Errors
+    CHECK_THROWS(std::invalid_argument, mi.start_camera("unknown"));
+    CHECK_THROWS(std::invalid_argument, mi.start_camera("cam", 0.0));
+    CHECK_THROWS(std::invalid_argument, mi.start_camera("cam", 1000.0));
+    CHECK_THROWS(std::runtime_error, mi.get_camera_image("cam"));    // not started
+    CHECK_THROWS(std::invalid_argument, mi.stop_camera("cam"));
+
+    // RGB and depth, in stepped mode (the camera thread renders the current state)
+    mi.start_camera("cam", 100.0, true);
+    const auto image = wait_for_image(mi, "cam", 2);
+    check_test_image(image);
+    CHECK_NEAR(image.time, 0.0);
+
+    // RGB only, and the FAST quality
+    mi.start_camera("cam", 100.0, false, DQ_MujocoInterface::CAMERA_QUALITY::FAST);  // the count continues
+    const auto fast = wait_for_image(mi, "cam", mi.get_camera_image("cam").count + 2);
+    CHECK(fast.depth.empty());
+    check_test_image(fast);
+
+    mi.stop_camera("cam");
+    CHECK_THROWS(std::runtime_error, mi.get_camera_image("cam"));
+
+    // A camera of an MJCF model, without a resolution (640x480)
+    DQ_MujocoModel model;
+    model.name = "camera.xml";
+    model.xml = R"(<mujoco>
+      <worldbody>
+        <geom type="box" size="0.2 0.2 0.2" pos="2 0 1" rgba="1 0 0 1"/>
+        <camera name="xml_cam" pos="0 0 1" xyaxes="0 -1 0 0 0 1"/>
+      </worldbody>
+    </mujoco>)";
+    mi.load_model(model);
+    mi.start_camera("xml_cam");
+    const auto xml_image = wait_for_image(mi, "xml_cam", 1);
+    CHECK(xml_image.width == 640 && xml_image.height == 480);
+    CHECK(is_red(pixel(xml_image, 240, 320)));
+}
+
+static void cameras_while_running()
+{
+    // A camera on a kinematic rig, and a camera fixed in the world, while the simulation runs
+    DQ_MujocoSceneBuilder builder;
+    add_camera_test_objects(builder);
+    builder.add_box("rig", 1 + 0.5*E_*(1.0*k_), {0.02, 0.02, 0.02}, BODY::KINEMATIC);
+    builder.add_camera("cam", DQ_MujocoSceneBuilder::look_at(DQ(0), 1.0*i_), "rig", 60, 160, 120);
+    builder.add_camera("world_cam", DQ_MujocoSceneBuilder::look_at(1.0*k_, 2.0*i_ + 1.0*k_), "", 60, 160, 120);
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(builder.build());
+    mi.start_simulation();
+    mi.start_camera("cam", 40.0, true);
+    mi.start_camera("world_cam", 10.0);
+
+    // Each camera at its own rate
+    const auto first = mi.get_camera_image("cam");
+    sleep_for(1.0);
+    const auto image = mi.get_camera_image("cam");
+    const auto world_image = mi.get_camera_image("world_cam");
+    CHECK(image.count - first.count >= 30 && image.count - first.count <= 45);
+    CHECK(world_image.count >= 7 && world_image.count <= 12);
+    CHECK(image.time > first.time);  // the simulation time of the state in the image
+    check_test_image(image);
+    check_test_image(world_image);
+
+    // The camera moves with its body: 1 m back, the red box is 1 m farther
+    mi.set_body_pose("rig", 1 + 0.5*E_*(-1.0*i_ + 1.0*k_));
+    check_test_image(wait_for_image(mi, "cam", mi.get_camera_image("cam").count + 2), -1.0);
+
+    // A stopped camera renders no more images
+    mi.stop_camera("world_cam");
+    CHECK_THROWS(std::runtime_error, mi.get_camera_image("world_cam"));
+
+    // Edits keep the cameras: a blue box in front (and a floor, whose texture rebuilds the GPU
+    // resources of the cameras)
+    mi.edit_scene([](DQ_MujocoSceneBuilder& scene) {
+        scene.add_box("blue", 1 + 0.5*E_*(1.0*i_ + 1.0*k_), {0.1, 0.1, 0.1}, BODY::FIXED, {0, 0, 1, 1});
+        scene.add_floor();
+    });
+    const auto after = wait_for_image(mi, "cam", mi.get_camera_image("cam").count + 2);
+    const auto p = pixel(after, 60, 80);
+    CHECK(p[2] > 80 && p[2] > 2*p[0] && p[2] > 2*p[1]);
+    CHECK(std::abs(after.depth.at(160*60 + 80) - 1.9) < 0.01);  // the blue box, 0.9 + 1 m away
+
+    // A camera removed from the scene is stopped
+    mi.edit_scene([](DQ_MujocoSceneBuilder& scene) { scene.remove("cam"); });
+    CHECK_THROWS(std::runtime_error, mi.get_camera_image("cam"));
+    CHECK(mi.get_camera_names() == std::vector<std::string>{"world_cam"});
+    mi.stop_simulation();
+}
+
+static void camera_in_window_mode()
+{
+    // In WINDOW mode the camera thread has its own context (a hidden window), next to the viewer's
+    glfwSetErrorCallback(count_glfw_error);
+    DQ_MujocoSceneBuilder builder;
+    add_camera_test_objects(builder);
+    builder.add_camera("cam", DQ_MujocoSceneBuilder::look_at(1.0*k_, 2.0*i_ + 1.0*k_), "", 60, 160, 120);
+    DQ_MujocoInterface mi;
+    mi.load_model(builder.build());
+    mi.start_simulation();
+    mi.start_camera("cam", 30.0, true);
+    show_for(mi, 0.5);
+    check_test_image(wait_for_image(mi, "cam", 5));
+    // An edit that rebuilds the GPU resources of both the viewer and the camera
+    mi.edit_scene([](DQ_MujocoSceneBuilder& scene) { scene.add_floor(); });
+    show_for(mi, 0.3);
+    check_test_image(wait_for_image(mi, "cam", mi.get_camera_image("cam").count + 2));
+    CHECK(mi.is_simulation_running());
+    CHECK(glfw_errors == 0);
+}
+
 static void scene_builder_mounted_robot()
 {
     // An arm mounted on the back of a quadruped: it is at home where it was mounted, and it moves with
@@ -1709,6 +1904,9 @@ int main(int argc, char** argv)
         {"generic_manipulator_kinematics", generic_manipulator_kinematics},
         {"generic_quadruped_kinematics", generic_quadruped_kinematics},
         {"scene_builder_mounted_robot", scene_builder_mounted_robot},
+        {"cameras_headless", cameras_headless},
+        {"cameras_while_running", cameras_while_running},
+        {"camera_in_window_mode", camera_in_window_mode},
         {"sensors_of_a_model", sensors_of_a_model},
         {"scene_builder_sensors", scene_builder_sensors},
         {"edit_scene_sensors_while_running", edit_scene_sensors_while_running},

@@ -16,6 +16,7 @@ set(ROBOT_EXAMPLES
     floating_base
     scene_builder
     sensors
+    cameras
 )
 if(DQ_MUJOCO_BUILD_ROBOTS)
     list(APPEND EXAMPLES ${ROBOT_EXAMPLES})

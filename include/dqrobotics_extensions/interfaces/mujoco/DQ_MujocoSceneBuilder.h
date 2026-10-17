@@ -128,6 +128,19 @@ public:
                           const Eigen::Vector3d& half_sizes, const std::string& parent_body = "");
     void add_rangefinder(const std::string& name, const DQ_robotics::DQ& pose, const std::string& parent_body = "");
 
+    // A camera, on a body of the scene or in the world, rendered with DQ_MujocoInterface::start_camera().
+    // It looks along the -z axis of its pose, with x to the right of the image and y up (MuJoCo's
+    // convention); look_at() gives such a pose. fovy is the vertical field of view, in degrees.
+    void add_camera(const std::string& name, const DQ_robotics::DQ& pose,
+                    const std::string& parent_body = "",
+                    const double& fovy = 45.0,
+                    const int& width = 640,
+                    const int& height = 480);
+    // The pose of a camera at position (a pure quaternion) that looks at target, with the top of the
+    // image towards up as much as possible
+    static DQ_robotics::DQ look_at(const DQ_robotics::DQ& position, const DQ_robotics::DQ& target,
+                                   const DQ_robotics::DQ& up = DQ_robotics::k_);
+
     // Robots of the robots library (or any robot described by a DQ_MujocoRobotDescription), in the
     // world or mounted on a body of the scene (e.g., an arm on a quadruped)
     DQ_MujocoRobotDescription add_robot(const DQ_MujocoRobotDescription& robot,
@@ -135,8 +148,8 @@ public:
                                         const DQ_robotics::DQ& pose = DQ_robotics::DQ(1),
                                         const std::string& parent_body = "");
 
-    // Remove an object, a site, a sensor (by its site), a light, the floor, or a robot (by the prefixed
-    // name of its root body)
+    // Remove an object, a site, a sensor (by its site), a camera, a light, the floor, or a robot (by
+    // the prefixed name of its root body)
     void remove(const std::string& name);
 
     DQ_MujocoModel build() const;

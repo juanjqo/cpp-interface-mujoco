@@ -507,7 +507,7 @@ void DQ_MujocoSceneBuilder::Impl::remove(const std::string& name)
 {
     if (name.empty() || name == "world")
         throw std::invalid_argument("Bad call in DQ_MujocoSceneBuilder::remove. Invalid name \"" + name + "\".");
-    for (const mjtObj& type : {mjOBJ_BODY, mjOBJ_SITE, mjOBJ_LIGHT, mjOBJ_GEOM})
+    for (const mjtObj& type : {mjOBJ_BODY, mjOBJ_SITE, mjOBJ_CAMERA, mjOBJ_LIGHT, mjOBJ_GEOM})
     {
         if (mjsElement* element = mjs_findElement(spec_, type, name.c_str()))
         {
@@ -966,6 +966,68 @@ void DQ_MujocoSceneBuilder::add_rangefinder(const std::string& name, const DQ& p
 }
 
 /**
+ * @brief Add a camera, rendered with DQ_MujocoInterface::start_camera() (also in HEADLESS mode)
+ * @param name Name of the camera.
+ * @param pose Pose of the camera in the frame of parent_body (in the world if it is empty). The camera
+ *        looks along the -z axis of its pose, with x to the right of the image and y up (MuJoCo's
+ *        convention; look_at() gives such a pose). For ROS, the optical frame (z forward, x right,
+ *        y down) is pose*i_ (a rotation of 180 degrees about x).
+ * @param parent_body The body that carries the camera (e.g., the head of a robot, with its prefixed
+ *        name).
+ * @param fovy Vertical field of view, in degrees, in (0, 180).
+ * @param width, height Resolution of the images, in pixels.
+ * @throws std::invalid_argument If the name is in use, there is no parent_body, or a value is invalid
+ */
+void DQ_MujocoSceneBuilder::add_camera(const std::string& name, const DQ& pose, const std::string& parent_body,
+                                       const double& fovy, const int& width, const int& height)
+{
+    const std::string function_name = error_msg_layout_ + "add_camera";
+    impl_->check_name_is_free(mjOBJ_CAMERA, name);
+    if (!(fovy > 0 && fovy < 180))
+        throw std::invalid_argument(function_name + ". The field of view must be in (0, 180) degrees.");
+    if (width < 2 || height < 2)
+        throw std::invalid_argument(function_name + ". The resolution must be at least 2x2 pixels.");
+    mjsCamera* camera = mjs_addCamera(impl_->body_or_world(parent_body, function_name), nullptr);
+    mjs_setName(camera->element, name.c_str());
+    set_pose(camera->pos, camera->quat, pose, function_name);
+    camera->fovy = fovy;
+    camera->resolution[0] = width;
+    camera->resolution[1] = height;
+}
+
+/**
+ * @brief The pose of a camera that looks at a point
+ * @param position Position of the camera, as a pure quaternion.
+ * @param target The point it looks at, as a pure quaternion (different from position).
+ * @param up The direction towards the top of the image, as a pure quaternion (default: the z axis of
+ *        the world). It must not be parallel to target - position.
+ * @return The pose, in MuJoCo's convention for cameras: the camera looks along the -z axis of the pose,
+ *         with x to the right of the image and y up.
+ * @throws std::invalid_argument If target equals position, or up is parallel to the line of sight
+ */
+DQ DQ_MujocoSceneBuilder::look_at(const DQ& position, const DQ& target, const DQ& up)
+{
+    const Vector3d p = position.vec3();
+    Vector3d forward = target.vec3() - p;
+    if (forward.norm() < 1e-12)
+        throw std::invalid_argument("Bad call in DQ_MujocoSceneBuilder::look_at. The target equals the position.");
+    forward.normalize();
+    Vector3d right = forward.cross(up.vec3());
+    if (right.norm() < 1e-9)
+        throw std::invalid_argument("Bad call in DQ_MujocoSceneBuilder::look_at. The up direction is parallel to "
+                                    "the line of sight.");
+    right.normalize();
+    Matrix3d rotation;
+    rotation.col(0) = right;                      // x: to the right of the image
+    rotation.col(1) = right.cross(forward);       // y: up in the image
+    rotation.col(2) = -forward;                   // z: backwards (the camera looks along -z)
+    const Quaterniond q(rotation);
+    const DQ r = DQ(q.w(), q.x(), q.y(), q.z()).normalize();
+    const DQ t = p(0)*i_ + p(1)*j_ + p(2)*k_;
+    return r + 0.5*E_*t*r;
+}
+
+/**
  * @brief Add a robot, e.g., one of the robots library
  * @param robot The robot (GenericQuadrupedRobot::description(), ...).
  * @param prefix Prefix added to every name of the robot, so that several robots can be added (e.g.,
@@ -1011,7 +1073,7 @@ DQ_MujocoRobotDescription DQ_MujocoSceneBuilder::add_robot(const DQ_MujocoRobotD
 }
 
 /**
- * @brief Remove an object, a site, a sensor, a light, the floor, or a robot
+ * @brief Remove an object, a site, a sensor, a camera, a light, the floor, or a robot
  * @param name Its name. For a sensor, the name of its site (e.g., of an IMU added with add_imu()). For
  *        a robot, the name of its root body with the prefix (e.g., "arm_base" or, for a
  *        floating-base robot, its floating base, e.g., "dog_trunk"): its joints, actuators and

@@ -32,6 +32,15 @@ if(UNIX AND NOT APPLE)
         OpenGL::GL
         Eigen3::Eigen
     )
+    # EGL renders the cameras in HEADLESS mode (no window). Without it, cameras need WINDOW mode.
+    find_package(OpenGL COMPONENTS EGL)
+    if(OpenGL_EGL_FOUND)
+        list(APPEND TOOL_LIBS OpenGL::EGL)
+        set(DQ_MUJOCO_HAS_EGL ON)
+        message(STATUS "EGL found: cameras can be rendered in HEADLESS mode")
+    else()
+        message(STATUS "EGL not found: cameras need WINDOW mode")
+    endif()
     add_compile_options(-Wno-format-truncation
         -Werror=return-type -Wall -Wextra -Wmissing-declarations -Wredundant-decls -Woverloaded-virtual -fPIC)
 endif()
