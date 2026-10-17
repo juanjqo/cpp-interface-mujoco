@@ -15,8 +15,6 @@ set(ROBOT_EXAMPLES
     reference_frames
     floating_base
     scene_builder
-    unitree_z1
-    unitree_b1
 )
 if(DQ_MUJOCO_BUILD_ROBOTS)
     list(APPEND EXAMPLES ${ROBOT_EXAMPLES})
@@ -25,7 +23,7 @@ endif()
 foreach(example IN LISTS EXAMPLES)
     add_executable(${example} ${example}.cpp)
     if(example IN_LIST ROBOT_EXAMPLES)
-        target_link_libraries(${example} PRIVATE dqrobotics_extensions::interface-mujoco-robots)
+        target_link_libraries(${example} PRIVATE dqrobotics_extensions::interface-mujoco-generic-robots)
     else()
         target_link_libraries(${example} PRIVATE dqrobotics_extensions::interface-mujoco)
     endif()

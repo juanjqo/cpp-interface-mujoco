@@ -22,8 +22,10 @@
 # Then, in another CMake project:
 #   find_package(dqrobotics-interface-mujoco REQUIRED)
 #   target_link_libraries(my_app PRIVATE dqrobotics_extensions::interface-mujoco)
-# and, to use the robot models (e.g., GenericQuadrupedRobot::description()):
-#   target_link_libraries(my_app PRIVATE dqrobotics_extensions::interface-mujoco-robots)
+# and, to use the generic robot models (e.g., GenericQuadrupedRobot::description()):
+#   target_link_libraries(my_app PRIVATE dqrobotics_extensions::interface-mujoco-generic-robots)
+# The package also provides dq_mujoco_embed_model(), to embed models in a target. Models of real
+# robots are in cpp-interface-mujoco-robots (https://github.com/juanjqo/cpp-interface-mujoco-robots).
 #---------------------------------------------------------------------------------------------------
 
 cmake_minimum_required(VERSION 3.22...3.28)
@@ -55,7 +57,7 @@ endif()
 
 option(DQ_MUJOCO_BUILD_EXAMPLES "Build the examples" ${PROJECT_IS_TOP_LEVEL})
 option(DQ_MUJOCO_BUILD_TESTS "Build the tests" ${PROJECT_IS_TOP_LEVEL})
-option(DQ_MUJOCO_BUILD_ROBOTS "Build the robots library (robot models embedded in the library)" ON)
+option(DQ_MUJOCO_BUILD_ROBOTS "Build the generic robots library (generic robot models embedded in the library)" ON)
 
 include(dependencies.cmake)
 include(GNUInstallDirs)
@@ -108,7 +110,7 @@ install(TARGETS ${PROJECT_NAME}
 )
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
-# Robots library: dqrobotics_extensions::interface-mujoco-robots (same export set)
+# Generic robots library: dqrobotics_extensions::interface-mujoco-generic-robots (same export set)
 if(DQ_MUJOCO_BUILD_ROBOTS)
     add_subdirectory(robots)
 endif()
@@ -128,9 +130,12 @@ write_basic_package_version_file(
     VERSION ${PROJECT_VERSION}
     COMPATIBILITY SameMajorVersion
 )
+# The package also provides dq_mujoco_embed_model(), to embed models in other libraries (e.g., the
+# robots of cpp-interface-mujoco-robots) and programs
 install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake
     ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}ConfigVersion.cmake
+    cmake/DQMujocoEmbedModel.cmake
     DESTINATION ${CONFIG_INSTALL_DIR}
 )
 

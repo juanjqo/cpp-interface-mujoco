@@ -1,0 +1,16 @@
+<mujoco>
+  <body name="base" pos="0 0 0.1">
+    <geom type="cylinder" size="0.05 0.05" material="checker" contype="0" conaffinity="0"/>
+    <body name="upper_arm" pos="0 0 0.05">
+      <joint name="shoulder" axis="0 1 0" range="-2 2" damping="1"/>
+      <geom type="mesh" mesh="link" material="checker"/>
+      <geom type="capsule" fromto="0 0 0 0 0 0.3" size="0.02" mass="0.5"/>
+      <body name="forearm" pos="0 0 0.3">
+        <joint name="elbow" axis="0 1 0" range="-2.5 2.5" damping="1"/>
+        <geom type="mesh" mesh="link"/>
+        <geom type="capsule" fromto="0 0 0 0 0 0.25" size="0.02" mass="0.3"/>
+        <site name="end_effector" pos="0 0 0.25" size="0.01"/>
+      </body>
+    </body>
+  </body>
+</mujoco>

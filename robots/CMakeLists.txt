@@ -1,40 +1,27 @@
 # Built from the top-level CMakeLists.txt (DQ_MUJOCO_BUILD_ROBOTS=ON)
 #
-# The robots library: robot models embedded in the library (no files needed at runtime), each with
-# a description class (e.g., GenericQuadrupedRobot::description()).
+# The generic robots library: generic robot models, built from primitive shapes and embedded in the
+# library (no files needed at runtime), each with a description class (e.g.,
+# GenericQuadrupedRobot::description()). The examples and the tests use them.
 #
-# The generic robots are in models/. The other robots are in cpp-interface-mujoco-models
-# (https://github.com/juanjqo/cpp-interface-mujoco-models), fetched at the commit below. To use a
-# local checkout instead (e.g., while changing a model), configure with
-#   -DFETCHCONTENT_SOURCE_DIR_CPP_INTERFACE_MUJOCO_MODELS=<path to the checkout>
+# Models of real robots (e.g., the Unitree B1 and Z1) are in cpp-interface-mujoco-robots
+# (https://github.com/juanjqo/cpp-interface-mujoco-robots), a package built on this library.
 #
-# To add a robot:
-#   1. put its model in a directory (main XML directly in it, assets below it): models/<robot>/ for
-#      a generic robot, or a directory of cpp-interface-mujoco-models
+# To add a generic robot:
+#   1. put its model in models/<robot>/ (main XML directly in that directory, assets below it)
 #   2. embed it with dq_mujoco_embed_model() below
 #   3. add include/.../robots/<Robot>Robot.h and src/<Robot>Robot.cpp, which fill the description
 
 include(${PROJECT_SOURCE_DIR}/cmake/DQMujocoEmbedModel.cmake)
 
-include(FetchContent)
-FetchContent_Declare(
-    cpp_interface_mujoco_models
-    GIT_REPOSITORY https://github.com/juanjqo/cpp-interface-mujoco-models.git
-    GIT_TAG        main  # TODO: pin to a commit
-)
-FetchContent_MakeAvailable(cpp_interface_mujoco_models)  # no CMakeLists.txt: only downloaded
-set(MODELS_DIR ${cpp_interface_mujoco_models_SOURCE_DIR})
-
-set(ROBOTS_TARGET ${PROJECT_NAME}-robots)
+set(ROBOTS_TARGET ${PROJECT_NAME}-generic-robots)
 
 add_library(${ROBOTS_TARGET}
     src/GenericManipulatorRobot.cpp
     src/GenericQuadrupedRobot.cpp
-    src/UnitreeB1Robot.cpp
-    src/UnitreeZ1Robot.cpp
 )
-add_library(dqrobotics_extensions::interface-mujoco-robots ALIAS ${ROBOTS_TARGET})
-set_target_properties(${ROBOTS_TARGET} PROPERTIES EXPORT_NAME interface-mujoco-robots)
+add_library(dqrobotics_extensions::interface-mujoco-generic-robots ALIAS ${ROBOTS_TARGET})
+set_target_properties(${ROBOTS_TARGET} PROPERTIES EXPORT_NAME interface-mujoco-generic-robots)
 
 dq_mujoco_embed_model(${ROBOTS_TARGET}
     FUNCTION  generic_manipulator
@@ -45,27 +32,6 @@ dq_mujoco_embed_model(${ROBOTS_TARGET}
     FUNCTION  generic_quadruped
     DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/models/generic_quadruped
     MAIN      generic_quadruped.xml
-)
-# The B1 with position actuators, and with velocity actuators and torque motors (b1_velocity.xml and
-# b1_torque.xml, as more assets), sharing the robot (b1_robot.xml) and the meshes
-file(GLOB unitree_b1_meshes RELATIVE ${MODELS_DIR}/unitree_b1
-     CONFIGURE_DEPENDS ${MODELS_DIR}/unitree_b1/assets/*.obj)
-dq_mujoco_embed_model(${ROBOTS_TARGET}
-    FUNCTION  unitree_b1
-    DIRECTORY ${MODELS_DIR}/unitree_b1
-    MAIN      b1.xml
-    ASSETS    b1_velocity.xml b1_torque.xml b1_robot.xml ${unitree_b1_meshes}
-)
-# The Z1 with its gripper and position actuators, and the other variants (as more assets), sharing the
-# robots they include (z1_robot.xml and z1_gripper_robot.xml) and the meshes
-file(GLOB unitree_z1_meshes RELATIVE ${MODELS_DIR}/unitree_z1
-     CONFIGURE_DEPENDS ${MODELS_DIR}/unitree_z1/assets/*.stl)
-dq_mujoco_embed_model(${ROBOTS_TARGET}
-    FUNCTION  unitree_z1
-    DIRECTORY ${MODELS_DIR}/unitree_z1
-    MAIN      z1_gripper.xml
-    ASSETS    z1.xml z1_velocity.xml z1_torque.xml z1_gripper_velocity.xml z1_gripper_torque.xml
-              z1_robot.xml z1_gripper_robot.xml ${unitree_z1_meshes}
 )
 
 target_include_directories(${ROBOTS_TARGET} PUBLIC
@@ -88,8 +54,3 @@ install(TARGETS ${ROBOTS_TARGET}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-# The licenses of the embedded models that are not ours (BSD-3-Clause asks to ship its notice with
-# the binaries)
-foreach(model unitree_b1 unitree_z1)
-    install(FILES ${MODELS_DIR}/${model}/LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR}/robots/${model})
-endforeach()
