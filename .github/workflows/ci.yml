@@ -1,8 +1,13 @@
 name: CI
 
+# Builds the library, the examples and the tests, runs the tests, and checks the installation.
+# MuJoCo is built from source (FetchContent), and ccache keeps it between runs. sas_cpp is fetched by
+# CMake too (there is no installed libmarinholab-sas-core on the runner).
+
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build-and-test:
@@ -15,17 +20,30 @@ jobs:
           sudo add-apt-repository -y ppa:dqrobotics-dev/development
           sudo apt-get update
           sudo apt-get install -y build-essential cmake libeigen3-dev libglfw3-dev libgl1-mesa-dev \
-            libgl1-mesa-dri libdqrobotics xvfb valgrind
+            libgl1-mesa-dri libdqrobotics xvfb valgrind ninja-build ccache
+
+      - name: Cache the compilation (ccache)
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ runner.os }}-${{ hashFiles('dependencies.cmake') }}
+          max-size: 2G
 
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build
-        run: cmake --build build -j $(nproc)
+        run: cmake --build build
 
       # Most tests are headless. The window tests run on a virtual display with software OpenGL.
       - name: Test
         run: xvfb-run -a -s "-screen 0 1280x1024x24" ctest --test-dir build --output-on-failure
 
       - name: Install
-        run: cmake --install build --prefix "${{ runner.temp }}/install"
+        run: |
+          cmake --install build --prefix "${{ runner.temp }}/install"
+          test -f "${{ runner.temp }}/install/lib/cmake/dqrobotics-interface-mujoco/dqrobotics-interface-mujocoConfig.cmake"
+          test -f "${{ runner.temp }}/install/lib/cmake/dqrobotics-interface-mujoco/DQMujocoEmbedModel.cmake"
+          test -f "${{ runner.temp }}/install/share/doc/dqrobotics-interface-mujoco/LICENSE"
+          test -f "${{ runner.temp }}/install/share/doc/dqrobotics-interface-mujoco/third_party/mujoco/LICENSE"
