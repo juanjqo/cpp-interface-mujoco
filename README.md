@@ -146,11 +146,12 @@ cd ~/git/cpp-interface-mujoco/build/examples
 | [`reference_frames`](examples/reference_frames.cpp) | Draws desired, measured and fixed reference frames, plus a trail of past poses created and removed on the fly |
 | [`floating_base`](examples/floating_base.cpp) | A quadruped starts from its `home` keyframe, rocks its trunk with the leg actuators and gets pushed with `set_base_twist`; the camera follows it |
 | [`scene_builder`](examples/scene_builder.cpp) | Builds a scene in code (a table, two quadrupeds, an arm and a kinematic block moved with `set_body_pose`) and edits it while it runs in real time: a ball is dropped every 2 s and the oldest is removed; the arm's kinematics, moved to where it was placed, are drawn on its end effector |
+| [`unitree_z1`](examples/unitree_z1.cpp) | Two Unitree Z1 arms, with and without the gripper, placed with the scene builder: each end effector follows a moving target with a kinematic controller that uses `UnitreeZ1Robot::kinematics()`, and the gripper opens and closes |
 | [`twist_open_loop`](examples/twist_open_loop.cpp) | Stepped simulation paced by a sas `Clock`: commands a floating box with constant twists (no feedback) in `WORLD_FRAME` and `BODY_FRAME`, before every step: rise, orbit the world z axis, spin in place, drive in a circle, descend |
 
 The first three examples use `GenericManipulatorRobot`, a generic 6-DoF arm, `floating_base` uses
-`GenericQuadrupedRobot`, and `scene_builder` uses both, all from the [robots library](#robots-library), so they need no
-model files.
+`GenericQuadrupedRobot`, `scene_builder` uses both, and `unitree_z1` uses `UnitreeZ1Robot`, all from the
+[robots library](#robots-library), so they need no model files.
 `twist_open_loop` uses [`examples/models/floating_box.xml`](examples/models/floating_box.xml), a box with gravity
 compensation, which is copied next to the executables at build time.
 
@@ -364,6 +365,7 @@ DQ x_foot = mi.get_site_pose(robot.end_effector_sites.at(0));   // "FL_foot"
 |---|---|---|
 | `GenericManipulatorRobot` | [`GenericManipulatorRobot.h`](robots/include/dqrobotics_extensions/interfaces/mujoco/robots/GenericManipulatorRobot.h) | 6-DoF arm built from primitive shapes, with position actuators; fixed base, end effector `end_effector`, keyframe `home`. Also has a free-standing `target` site in the world. `kinematics()` returns its `DQ_SerialManipulatorDH` |
 | `GenericQuadrupedRobot` | [`GenericQuadrupedRobot.h`](robots/include/dqrobotics_extensions/interfaces/mujoco/robots/GenericQuadrupedRobot.h) | Quadruped with 2 joints per leg, built from primitive shapes; floating base `trunk`, feet `FL_foot`, `FR_foot`, `RL_foot`, `RR_foot`, keyframe `home`. `kinematics()` returns one `DQ_SerialManipulatorDH` per leg, in the trunk frame |
+| `UnitreeZ1Robot` | [`UnitreeZ1Robot.h`](robots/include/dqrobotics_extensions/interfaces/mujoco/robots/UnitreeZ1Robot.h) | The Unitree Z1, a 6-DoF arm, from [MuJoCo Menagerie](robots/models/unitree_z1) (with its meshes), with or without its gripper: `description(UnitreeZ1Robot::GRIPPER::WITH)` (default) or `GRIPPER::WITHOUT`. Fixed base, end effector `end_effector` (tip of the gripper, or flange), keyframe `home`; the gripper joint is in `gripper_joint_names`. `kinematics(gripper)` returns its `DQ_SerialManipulatorDH` (the DH model of [Adorno-Lab/unitree_kinematics](https://github.com/Adorno-Lab/unitree_kinematics)) |
 
 Robots can also provide their DQ Robotics kinematic model, which matches the MuJoCo model (a test checks that
 `fkm(q)` equals the pose of the end-effector site), so a controller and the simulation share the same geometry:
@@ -436,7 +438,10 @@ mi.reset_simulation("home");   // every robot at its home configuration, where i
   platform slides instead of being carried by friction.
 - **Kinematics** of a placed robot: move its reference frame to where it was placed,
   `kinematics.set_reference_frame(x_arm*kinematics.get_reference_frame())`.
-- **Not yet supported:** robots with asset files (meshes, textures), e.g., MuJoCo Menagerie models.
+- **Robots with meshes and textures** (e.g., `UnitreeZ1Robot`, from MuJoCo Menagerie) must have their files in the
+  assets of their model. The scene keeps them under `robot_assets/`, with the hash of their content in the name, so a
+  file shared by several robots is stored once. `build()` returns them in its `assets`: to save the scene, write the
+  `xml` and each asset at its path, relative to the XML file.
 
 #### Editing a scene while it runs
 
@@ -457,10 +462,16 @@ mi.edit_scene([](DQ_MujocoSceneBuilder& scene) { scene.remove("arm2_base"); }); 
 - It works with any loaded model (from a file, from memory, or built), and keeps its "home" keyframe up to date.
 - Edits are checked before they are applied: if one makes the scene invalid (e.g., a name already in use), or the
   function throws, the scene is left unchanged and the exception is rethrown.
-- An edit takes about 10 ms with the example scenes. A real-time simulation keeps running: it waits while the model
-  is recompiled and then catches up. Site poses set with `set_site_pose()`, the camera and the reference frames are
-  kept.
+- An edit recompiles the whole scene: about 10 ms with the scenes made of primitive shapes, but about 260 ms to add
+  a Unitree Z1 to a running scene, and about 190 ms to add a ball to a scene with three of them, since their meshes are
+  large. A real-time simulation keeps running: it waits while the model is recompiled (most of that time) and then
+  catches up. Site poses set with `set_site_pose()`, the camera and the reference frames are kept.
 - Call it from the main thread.
+
+> **Recommendation:** build the scene before starting the control loop, and do not edit it while the loop runs.
+> Editing on the go is possible, but each edit stalls the simulation while the model is recompiled (longer with
+> meshes), and the controller sees a pause and a jump. Use edits for setup steps, and between experiments. To move
+> objects during the loop, use `KINEMATIC` bodies with `set_body_pose()`, which take microseconds.
 
 ### Models in memory
 
@@ -551,7 +562,10 @@ but not drawn.
 Copyright (C) 2025-2026 Juan Jose Quiroz Omana. Licensed under the [LGPL-3.0-or-later](LICENSE).
 
 This project uses [DQ Robotics](https://github.com/dqrobotics/cpp) (LGPL-3.0-or-later) but is not part of the DQ
-Robotics project. It also uses [MuJoCo](https://github.com/google-deepmind/mujoco) (Apache-2.0), which is downloaded at
+Robotics project. The robots library embeds the Unitree Z1 model of
+[MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie), BSD-3-Clause, Copyright (c) 2016-2022 Unitree
+Robotics (see [`robots/models/unitree_z1`](robots/models/unitree_z1), whose license is installed with the library). It
+also uses [MuJoCo](https://github.com/google-deepmind/mujoco) (Apache-2.0), which is downloaded at
 build time and installed with the library; the mouse and scroll handling of the viewer is adapted from MuJoCo's
 `sample/basic.cc`. Its threads are run by [sas_cpp](https://github.com/MarinhoLab/sas_cpp) (LGPL-3.0), which prints
 its license notice when a thread is created.

@@ -2659,6 +2659,8 @@ void DQ_MujocoInterface::set_camera_tracking(const std::string& bodyname)
  * });
  * @endcode
  *
+ * Robots with files (meshes, textures) can be added too, also to a model loaded from a file.
+ *
  * The state of the simulation is kept (time, positions, velocities, commands): the scene changes
  * without a reset, and new objects and robots start at their home configuration. The "home"
  * keyframe of the scene is updated to include them. Other keyframes of the model are not.
@@ -2666,8 +2668,14 @@ void DQ_MujocoInterface::set_camera_tracking(const std::string& bodyname)
  *
  * The edits are checked before they are applied: if they make the scene invalid (e.g., a name
  * that is already used), or edit throws, the scene is left as it was and the exception is
- * rethrown. A real-time simulation keeps running: it waits while the model is recompiled (a few
- * milliseconds) and then catches up. Call it from the main thread (the one that loaded the model).
+ * rethrown. A real-time simulation keeps running: it waits while the model is recompiled and then
+ * catches up. Call it from the main thread (the one that loaded the model).
+ *
+ * @note Recommendation: build the scene before starting the control loop, and do not edit it while
+ *       the loop runs. Each edit recompiles the whole scene, which stalls the simulation: about 10 ms
+ *       with primitive shapes, but hundreds of milliseconds with robots that have large meshes (e.g.,
+ *       about 260 ms to add a Unitree Z1). To move objects during the loop, use KINEMATIC bodies and
+ *       set_body_pose().
  *
  * @note Handles and names cached by the interface are refreshed, since the ids of the elements can
  *       change. Names given by the user stay valid.
@@ -2695,10 +2703,30 @@ void DQ_MujocoInterface::edit_scene(const std::function<void(DQ_MujocoSceneBuild
             if (spec) mj_deleteSpec(spec);
         }
     };
+    std::vector<std::string> added_files;
     try
     {
         DQ_MujocoSceneBuilder scene(std::make_unique<DQ_MujocoSceneBuilder::Impl>(impl.spec_, impl.m_));
         edit(scene);
+
+        // The files of the robots added by the edit (meshes, textures). A model loaded from a file
+        // has no virtual file system: the one created here falls back to the file system.
+        if (!scene.impl_->assets_.empty() && !impl.vfs_)
+        {
+            impl.vfs_.reset(new mjVFS);
+            mj_defaultVFS(impl.vfs_.get());
+        }
+        for (const auto& [name, content] : scene.impl_->assets_)
+        {
+            const int result = content.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())
+                ? -1 : mj_addBufferVFS(impl.vfs_.get(), name.c_str(), content.data(),
+                                       static_cast<int>(content.size()));
+            if (result == 0)
+                added_files.push_back(name);
+            else if (result != 2)  // 2: already there, the same file (its path has the hash of its content)
+                throw std::runtime_error(error_msg_layout_ + "edit_scene. Failed to add the file \""
+                                         + name + "\" to the scene.");
+        }
 
         // Check the edited scene
         Compiled check;
@@ -2741,6 +2769,8 @@ void DQ_MujocoInterface::edit_scene(const std::function<void(DQ_MujocoSceneBuild
     {
         mj_deleteSpec(impl.spec_);
         impl.spec_ = backup;
+        for (const auto& name : added_files)
+            mj_deleteFileVFS(impl.vfs_.get(), name.c_str());
         throw;
     }
     mj_deleteSpec(backup);

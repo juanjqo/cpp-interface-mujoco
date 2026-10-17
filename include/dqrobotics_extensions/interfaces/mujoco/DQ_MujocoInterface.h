@@ -62,7 +62,9 @@ public:
 
     void load_model(const std::string& xml_model);
     void load_model(const DQ_MujocoModel& model);
-    // Edit the loaded scene (add/remove objects, robots, ...), also while it runs; the state is kept
+    // Edit the loaded scene (add/remove objects, robots, ...), also while it runs; the state is kept.
+    // Each edit stalls the simulation while it is recompiled (longer with meshes): prefer building
+    // the scene before the control loop starts.
     void edit_scene(const std::function<void(DQ_MujocoSceneBuilder&)>& edit);
 
 

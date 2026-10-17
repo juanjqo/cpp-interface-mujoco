@@ -38,8 +38,12 @@ struct DQ_MujocoRobotDescription
     /// Body that owns the free joint, for get_base_pose() etc. Empty for fixed-base robots.
     std::string floating_base;
 
-    /// Actuated joints, in the order of the actuators (and of the keyframe ctrl).
+    /// Actuated joints, in the order of the actuators (and of the keyframe ctrl), without those of
+    /// the grippers: the joints of the kinematic model of the robot.
     std::vector<std::string> joint_names;
+    /// Actuated joints of the grippers, if any (e.g., set_joint_target_positions() opens and closes
+    /// them).
+    std::vector<std::string> gripper_joint_names;
 
     /// Keyframe with the default configuration, for reset_simulation(). Empty if there is none.
     std::string home_keyframe;

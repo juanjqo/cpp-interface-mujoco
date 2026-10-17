@@ -38,6 +38,12 @@ public:
     // all keyframes, when a body is deleted) pending until the next compilation.
     std::vector<std::string> dropped_keyframes_;
 
+    // The files (meshes, textures, ...) of the robots added by this builder, by their path in the
+    // scene: robot_assets/<name>_<hash of the content>.<extension>, so that the same file is
+    // stored once, and different files never share a path (or a file name, which MuJoCo's virtual
+    // file system also matches). build() returns them; edit_scene() adds them to the interface.
+    std::map<std::string, std::vector<unsigned char>> assets_;
+
     static constexpr const char* home_keyframe_name_ = "home";
 
     // A new, empty scene

@@ -65,6 +65,10 @@ set(TESTS
     generic_manipulator_description
     generic_manipulator_kinematics
     generic_quadruped_kinematics
+    unitree_z1_description
+    unitree_z1_kinematics
+    scene_builder_robot_with_meshes
+    edit_scene_robot_with_meshes
 )
 foreach(test_name IN LISTS TESTS)
     add_test(NAME ${test_name}

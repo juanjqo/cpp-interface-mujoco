@@ -8,6 +8,8 @@ It uses DQ Robotics (https://dqrobotics.github.io) but is not part of DQ Robotic
 */
 
 #include "DQ_MujocoSceneBuilderImpl.h"
+#include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -63,6 +65,117 @@ std::set<mjsElement*> elements_of(const mjSpec* spec, const mjtObj& type)
         elements.insert(e);
     return elements;
 }
+
+// The elements that refer to files. MuJoCo looks for them in the meshdir of the compiler (meshes,
+// skins, height fields) or in its texturedir (textures).
+const mjtObj file_types[] = {mjOBJ_MESH, mjOBJ_SKIN, mjOBJ_HFIELD, mjOBJ_TEXTURE};
+
+// The file names of an element (in C++, mjString is std::string), empty ones included
+std::vector<std::string*> files_of(mjsElement* element)
+{
+    switch (element->elemtype)
+    {
+    case mjOBJ_MESH:   return {mjs_asMesh(element)->file};
+    case mjOBJ_SKIN:   return {mjs_asSkin(element)->file};
+    case mjOBJ_HFIELD: return {mjs_asHField(element)->file};
+    case mjOBJ_TEXTURE:
+    {
+        mjsTexture* texture = mjs_asTexture(element);
+        std::vector<std::string*> files = {texture->file};
+        for (std::string& file : *texture->cubefiles)
+            files.push_back(&file);
+        return files;
+    }
+    default:           return {};
+    }
+}
+
+std::string strip_path(const std::string& file)
+{
+    const std::size_t n = file.find_last_of("/\\");
+    return n == std::string::npos ? file : file.substr(n + 1);
+}
+
+std::string join_path(const std::string& directory, const std::string& file)
+{
+    if (directory.empty())
+        return file;
+    const char last = directory.back();
+    return (last == '/' || last == '\\') ? directory + file : directory + "/" + file;
+}
+
+// The path of a file of a robot in the scene: robot_assets/<name>_<hash>.<extension>. The hash
+// (64-bit FNV-1a of the content) makes it the same for the same file, and different for different
+// files, also in the file name (MuJoCo's virtual file system falls back to matching file names).
+std::string scene_path(const std::string& original, const std::vector<unsigned char>& content)
+{
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (const unsigned char& byte : content)
+    {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    }
+    char hash_text[17];
+    std::snprintf(hash_text, sizeof(hash_text), "%016llx", static_cast<unsigned long long>(hash));
+
+    const std::string name = strip_path(original);
+    const std::size_t dot = name.find_last_of('.');
+    const std::string stem = dot == std::string::npos ? name : name.substr(0, dot);
+    const std::string extension = dot == std::string::npos ? "" : name.substr(dot);
+    return "robot_assets/" + stem + "_" + hash_text + extension;
+}
+
+/**
+ * @brief relocate_files points the files of a robot, parsed into child, to their paths in the
+ *        scene (see scene_path()), since the scene, when saved, does not keep the directories of
+ *        the attached models (meshdir, texturedir).
+ * @return The files, by their path in the scene, with their content in robot_model.assets.
+ */
+std::map<std::string, const std::vector<unsigned char>*> relocate_files(mjSpec* child,
+                                                                        const DQ_MujocoModel& robot_model,
+                                                                        const std::string& function_name)
+{
+    std::map<std::string, const std::vector<unsigned char>*> files;
+    for (const mjtObj& type : file_types)
+    {
+        const std::string directory = mjs_getString(type == mjOBJ_TEXTURE ? child->compiler.texturedir
+                                                                          : child->compiler.meshdir);
+        for (mjsElement* e = mjs_firstElement(child, type); e; e = mjs_nextElement(child, e))
+            for (std::string* file : files_of(e))
+            {
+                if (file->empty())
+                    continue;
+                const std::string original = join_path(directory, child->strippath ? strip_path(*file) : *file);
+                const auto it = robot_model.assets.find(original);
+                if (it == robot_model.assets.end())
+                    throw std::invalid_argument(function_name + ". The file \"" + original + "\" of the robot "
+                                                "is not in the assets of its model.");
+                const std::string path = scene_path(original, it->second);
+                files[path] = &it->second;
+                *file = path;
+            }
+    }
+    mjs_setString(child->compiler.meshdir, "");
+    mjs_setString(child->compiler.texturedir, "");
+    mjs_setString(child->modelfiledir, "");
+    return files;
+}
+
+// A virtual file system with the given files, deleted with it
+struct ScopedVFS
+{
+    mjVFS vfs;
+    ScopedVFS() { mj_defaultVFS(&vfs); }
+    ~ScopedVFS() { mj_deleteVFS(&vfs); }
+    ScopedVFS(const ScopedVFS&) = delete;
+    ScopedVFS& operator=(const ScopedVFS&) = delete;
+
+    bool add(const std::string& name, const void* buffer, const std::size_t& size)
+    {
+        return size <= static_cast<std::size_t>(std::numeric_limits<int>::max())
+               && mj_addBufferVFS(&vfs, name.c_str(), buffer, static_cast<int>(size)) == 0;
+    }
+};
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -170,40 +283,35 @@ DQ_MujocoRobotDescription DQ_MujocoSceneBuilder::Impl::add_robot(const DQ_Mujoco
     const std::string function_name = "Bad call in DQ_MujocoSceneBuilder::add_robot";
     if (robot.model.xml.empty())
         throw std::invalid_argument(function_name + ". The model of the robot is empty.");
-    if (!robot.model.assets.empty())
-        throw std::invalid_argument(function_name + ". Robots with asset files (meshes, textures) are "
-                                    "not supported yet.");
     if (!is_unit(pose))
         throw std::invalid_argument(function_name + ". The pose must be a unit dual quaternion!");
 
     // Parse the robot into its own specification (the attach moves its elements into the scene)
     const std::string file_name = robot.model.name.empty() ? "robot.xml" : robot.model.name;
-    mjVFS vfs;
-    mj_defaultVFS(&vfs);
+    ScopedVFS vfs;
     struct Cleanup
     {
-        mjVFS* vfs;
         mjSpec* spec = nullptr;
         mjModel* model = nullptr;
         ~Cleanup()
         {
             if (model) mj_deleteModel(model);
             if (spec) mj_deleteSpec(spec);
-            mj_deleteVFS(vfs);
         }
-    } cleanup{&vfs};
-    if (robot.model.xml.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())
-        || mj_addBufferVFS(&vfs, file_name.c_str(), robot.model.xml.data(),
-                           static_cast<int>(robot.model.xml.size())) != 0)
+    } cleanup;
+    if (!vfs.add(file_name, robot.model.xml.data(), robot.model.xml.size()))
         throw std::runtime_error(function_name + ". Failed to read the model of the robot.");
+    for (const auto& [name, content] : robot.model.assets)
+        if (!vfs.add(name, content.data(), content.size()))
+            throw std::runtime_error(function_name + ". Failed to read the file \"" + name + "\" of the robot.");
     char error[1000] = "";
-    mjSpec* child = mj_parseXML(file_name.c_str(), &vfs, error, sizeof(error));
+    mjSpec* child = mj_parseXML(file_name.c_str(), &vfs.vfs, error, sizeof(error));
     if (!child)
         throw std::runtime_error(function_name + ". Failed to parse the model of the robot: " + error);
     cleanup.spec = child;
 
     // Compile the robot alone, to read its home keyframe by name
-    mjModel* model = mj_compile(child, &vfs);
+    mjModel* model = mj_compile(child, &vfs.vfs);
     if (!model)
         throw std::runtime_error(function_name + ". Failed to compile the model of the robot: "
                                  + mjs_getError(child));
@@ -234,7 +342,12 @@ DQ_MujocoRobotDescription DQ_MujocoSceneBuilder::Impl::add_robot(const DQ_Mujoco
         throw std::invalid_argument(function_name + ". The root body of the robot must have a name.");
     check_name_is_free(mjOBJ_BODY, prefix + root_name);
 
-    const std::set<mjsElement*> textures_before = elements_of(spec_, mjOBJ_TEXTURE);
+    const std::map<std::string, const std::vector<unsigned char>*> files
+        = relocate_files(child, robot.model, function_name);
+    std::map<mjtObj, std::set<mjsElement*>> file_elements_before;
+    for (const mjtObj& type : file_types)
+        file_elements_before[type] = elements_of(spec_, type);
+    const std::set<mjsElement*>& textures_before = file_elements_before[mjOBJ_TEXTURE];
     const std::set<mjsElement*> materials_before = elements_of(spec_, mjOBJ_MATERIAL);
     mjsFrame* frame = mjs_addFrame(world(), nullptr);
     set_pose(frame->pos, frame->quat, pose, function_name);
@@ -280,6 +393,17 @@ DQ_MujocoRobotDescription DQ_MujocoSceneBuilder::Impl::add_robot(const DQ_Mujoco
     for (mjsElement* e : unused)
         mjs_delete(spec_, e);
 
+    // The files of the robot that the scene uses
+    for (const mjtObj& type : file_types)
+        for (mjsElement* e : elements_of(spec_, type))
+            if (!file_elements_before[type].count(e))
+                for (const std::string* file : files_of(e))
+                {
+                    const auto it = files.find(*file);
+                    if (it != files.end())
+                        assets_.emplace(it->first, *it->second);
+                }
+
     // The keyframes of the robot are replaced by the "home" keyframe of the scene. Its free bodies
     // keep their keyframe poses in the robot's frame, so they are moved to where it was placed.
     for (int k = 0; k < model->nkey; k++)
@@ -322,6 +446,8 @@ DQ_MujocoRobotDescription DQ_MujocoSceneBuilder::Impl::add_robot(const DQ_Mujoco
     placed.floating_base = robot.floating_base.empty() ? "" : prefix + robot.floating_base;
     for (const auto& name : robot.joint_names)
         placed.joint_names.push_back(prefix + name);
+    for (const auto& name : robot.gripper_joint_names)
+        placed.gripper_joint_names.push_back(prefix + name);
     placed.home_keyframe = home_keyframe_name_;
     for (const auto& name : robot.end_effector_sites)
         placed.end_effector_sites.push_back(prefix + name);
@@ -431,12 +557,17 @@ std::string DQ_MujocoSceneBuilder::Impl::to_xml() const
     if (!copy.spec)
         throw std::runtime_error(function_name + ". Failed to copy the scene.");
 
-    mjModel* model = mj_compile(copy.spec, nullptr);
+    ScopedVFS vfs;
+    for (const auto& [name, content] : assets_)
+        if (!vfs.add(name, content.data(), content.size()))
+            throw std::runtime_error(function_name + ". Failed to read the file \"" + name + "\".");
+
+    mjModel* model = mj_compile(copy.spec, &vfs.vfs);
     if (!model)
         throw std::runtime_error(function_name + ". Invalid scene: " + mjs_getError(copy.spec));
     fix_keyframes(copy.spec, model);
     mj_deleteModel(model);
-    model = mj_compile(copy.spec, nullptr);
+    model = mj_compile(copy.spec, &vfs.vfs);
     if (!model)
         throw std::runtime_error(function_name + ". Invalid scene: " + mjs_getError(copy.spec));
     mj_deleteModel(model);
@@ -677,8 +808,12 @@ void DQ_MujocoSceneBuilder::add_site(const std::string& name, const DQ& pose, co
  * kinematics.set_reference_frame(x*kinematics.get_reference_frame());
  * @endcode
  *
- * @throws std::invalid_argument If the robot has asset files (not supported yet), does not have
- *         exactly one body attached to its world, has no keyframe named home_keyframe, or if its
+ * The files of the robot (meshes, textures) must be in the assets of its model, as in the robots of
+ * the robots library. They are added to the scene under robot_assets/, once even if the robot is
+ * added several times.
+ *
+ * @throws std::invalid_argument If the robot does not have exactly one body attached to its world,
+ *         has no keyframe named home_keyframe, uses a file that is not in its assets, or if its
  *         names clash with the scene
  */
 DQ_MujocoRobotDescription DQ_MujocoSceneBuilder::add_robot(const DQ_MujocoRobotDescription& robot,
@@ -702,7 +837,9 @@ void DQ_MujocoSceneBuilder::remove(const std::string& name)
 /**
  * @brief Build the scene
  * @return The scene as a DQ_MujocoModel, to load with DQ_MujocoInterface::load_model(). Its xml is
- *         the MJCF of the scene, which can also be saved to a file.
+ *         the MJCF of the scene, and its assets are the files of the robots (meshes, textures),
+ *         under robot_assets/. To save the scene, write the xml and each asset at its path,
+ *         relative to the xml file.
  * @throws std::runtime_error If the scene is invalid (with MuJoCo's message)
  *
  * The builder is not changed: it can be changed and built again.
@@ -712,6 +849,7 @@ DQ_MujocoModel DQ_MujocoSceneBuilder::build() const
     DQ_MujocoModel model;
     model.name = "scene.xml";
     model.xml = impl_->to_xml();
+    model.assets = impl_->assets_;
     return model;
 }
 
