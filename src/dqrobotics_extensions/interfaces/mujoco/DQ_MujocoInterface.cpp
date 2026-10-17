@@ -99,13 +99,13 @@ public:
             action = mjMOUSE_ZOOM;
         }
         std::lock_guard<std::mutex> lock(viewer_mutex_);
-        mjv_moveCamera(m_, action, dx / height, dy / height, &scn_, &cam_);
+        mjv_moveCamera(m_, action, dx / height, dy / height, &cam_);
     }
 
     // Scroll handler
     void scroll([[maybe_unused]] GLFWwindow* window, double yoffset) {
         std::lock_guard<std::mutex> lock(viewer_mutex_);
-        mjv_moveCamera(m_, mjMOUSE_ZOOM, 0, 0.05 * yoffset, &scn_, &cam_);
+        mjv_moveCamera(m_, mjMOUSE_ZOOM, 0, 0.05 * yoffset, &cam_);
     }
 
 public:
@@ -931,6 +931,7 @@ public:
         mju_copy(snapshot_->xquat, d_->xquat, 4 * m_->nbody);
         mju_copy(snapshot_->site_xpos, d_->site_xpos, 3 * m_->nsite);
         mju_copy(snapshot_->site_xmat, d_->site_xmat, 9 * m_->nsite);
+        mju_copy(snapshot_->sensordata, d_->sensordata, m_->nsensordata);
     }
 
     /**
@@ -1542,6 +1543,40 @@ public:
         return r + 0.5 * E_ * p * r;
     }
 
+
+    /**
+     * @brief _get_sensor_id returns the id of a sensor, by its name.
+     */
+    int _get_sensor_id(const std::string& sensorname, const std::string& function_name) const
+    {
+        const int id = mj_name2id(m_, mjOBJ_SENSOR, sensorname.c_str());
+        if (id < 0)
+            throw std::runtime_error(function_name + ". There is no sensor \"" + sensorname + "\" in the model.");
+        return id;
+    }
+
+    /**
+     * @brief _get_site_sensor_id returns the id of the sensor of a given type attached to a site
+     *        (the typed sensor methods address sensors by their site, whatever their names).
+     * @param what The kind of sensor, for the error message (e.g., "IMU (accelerometer)").
+     */
+    int _get_site_sensor_id(const std::string& sitename, const mjtSensor& type, const std::string& what,
+                            const std::string& function_name) const
+    {
+        const int site_id = mj_name2id(m_, mjOBJ_SITE, sitename.c_str());
+        if (site_id < 0)
+            throw std::runtime_error(function_name + ". There is no site \"" + sitename + "\" in the model.");
+        for (int s = 0; s < m_->nsensor; s++)
+            if (m_->sensor_type[s] == type && m_->sensor_objtype[s] == mjOBJ_SITE && m_->sensor_objid[s] == site_id
+                && m_->sensor_refid[s] < 0)  // in the world frame (a framequat can be relative to another frame)
+                return s;
+        throw std::runtime_error(function_name + ". The site \"" + sitename + "\" has no " + what + " sensor.");
+    }
+
+    const mjtNum* _sensor_data(const mjData* d, const int& sensor_id) const
+    {
+        return d->sensordata + m_->sensor_adr[sensor_id];
+    }
 
     /**
      * @brief _get_joint_position
@@ -2257,6 +2292,148 @@ void DQ_MujocoInterface::set_site_pose(const std::string &objectname, const DQ &
         throw std::runtime_error(function_name + ". The pose must be a unit dual quaternion!");
     _check_model();
     impl_->modify_state([&]() { impl_->_set_site_pose(objectname, pose); });
+}
+
+/**
+ * @brief The names of the sensors of the model (MuJoCo <sensor> elements, and the sensors added with
+ *        DQ_MujocoSceneBuilder::add_imu(), ...), in the order of the model.
+ */
+std::vector<std::string> DQ_MujocoInterface::get_sensor_names() const
+{
+    _check_model();
+    std::vector<std::string> names;
+    for (int s = 0; s < impl_->m_->nsensor; s++)
+        if (const char* name = mj_id2name(impl_->m_, mjOBJ_SENSOR, s))
+            names.push_back(name);
+    return names;
+}
+
+/**
+ * @brief The values of a sensor, by its name: any MuJoCo sensor (e.g., jointpos, framelinvel, touch),
+ *        as MuJoCo computes it, also while the simulation runs
+ * @param sensorname Name of the sensor (the name of the <sensor> element).
+ * @return Its values (e.g., 3 for an accelerometer, 4 for a framequat: w, x, y, z).
+ *
+ * The values are those of the last step of the simulation. For IMUs, force/torque sensors, touch
+ * sensors and rangefinders, the typed methods (get_imu_orientation(), get_wrench(), ...) return them
+ * as DQ Robotics types, addressed by the site of the sensor.
+ * @throws std::runtime_error If there is no sensor with that name
+ */
+VectorXd DQ_MujocoInterface::get_sensor_data(const std::string& sensorname) const
+{
+    _check_model();
+    const int id = impl_->_get_sensor_id(sensorname, error_msg_layout_ + "get_sensor_data");
+    return impl_->read_state([&](const mjData* d) {
+        const mjtNum* data = impl_->_sensor_data(d, id);
+        return VectorXd(Map<const VectorXd>(data, impl_->m_->sensor_dim[id]));
+    });
+}
+
+/**
+ * @brief The orientation of an IMU in the world (a MuJoCo framequat sensor on its site)
+ * @param sitename The site of the IMU (e.g., added with DQ_MujocoSceneBuilder::add_imu()).
+ * @return A unit quaternion: the rotation from the world to the frame of the IMU.
+ * @throws std::runtime_error If there is no such site, or it has no framequat sensor (in the world)
+ */
+DQ DQ_MujocoInterface::get_imu_orientation(const std::string& sitename) const
+{
+    _check_model();
+    const int id = impl_->_get_site_sensor_id(sitename, mjSENS_FRAMEQUAT, "IMU (framequat)",
+                                              error_msg_layout_ + "get_imu_orientation");
+    return impl_->read_state([&](const mjData* d) {
+        const mjtNum* q = impl_->_sensor_data(d, id);
+        return DQ(q[0], q[1], q[2], q[3]).normalize();
+    });
+}
+
+/**
+ * @brief The angular velocity measured by an IMU (a MuJoCo gyro sensor on its site)
+ * @param sitename The site of the IMU.
+ * @return A pure quaternion, in rad/s, expressed in the frame of the IMU (as a real gyroscope).
+ * @throws std::runtime_error If there is no such site, or it has no gyro sensor
+ */
+DQ DQ_MujocoInterface::get_imu_angular_velocity(const std::string& sitename) const
+{
+    _check_model();
+    const int id = impl_->_get_site_sensor_id(sitename, mjSENS_GYRO, "IMU (gyro)",
+                                              error_msg_layout_ + "get_imu_angular_velocity");
+    return impl_->read_state([&](const mjData* d) {
+        const mjtNum* w = impl_->_sensor_data(d, id);
+        return DQ(0, w[0], w[1], w[2]);
+    });
+}
+
+/**
+ * @brief The linear acceleration measured by an IMU (a MuJoCo accelerometer on its site)
+ * @param sitename The site of the IMU.
+ * @return A pure quaternion, in m/s^2, expressed in the frame of the IMU. As a real accelerometer,
+ *         it includes gravity: at rest it measures 9.81 m/s^2 upwards, and in free fall zero.
+ * @note MuJoCo does not compute accelerations for bodies welded to the world, so an IMU on one
+ *       measures zero. Mount IMUs on bodies that move (e.g., the floating base of a robot).
+ * @throws std::runtime_error If there is no such site, or it has no accelerometer
+ */
+DQ DQ_MujocoInterface::get_imu_linear_acceleration(const std::string& sitename) const
+{
+    _check_model();
+    const int id = impl_->_get_site_sensor_id(sitename, mjSENS_ACCELEROMETER, "IMU (accelerometer)",
+                                              error_msg_layout_ + "get_imu_linear_acceleration");
+    return impl_->read_state([&](const mjData* d) {
+        const mjtNum* a = impl_->_sensor_data(d, id);
+        return DQ(0, a[0], a[1], a[2]);
+    });
+}
+
+/**
+ * @brief The wrench measured by a force/torque sensor (MuJoCo force and torque sensors on its site)
+ * @param sitename The site of the sensor (e.g., added with
+ *        DQ_MujocoSceneBuilder::add_force_torque_sensor()), on the body whose interaction with its
+ *        parent body is measured.
+ * @return The wrench f + E_*tau, in N and N·m, expressed in the frame of the site, at its origin: the
+ *         force and the torque that the parent body exerts on the body of the site. E.g., a sensor
+ *         at a wrist, with nothing in the hand, measures the weight of what is below it, upwards.
+ * @throws std::runtime_error If there is no such site, or it has no force or no torque sensor
+ */
+DQ DQ_MujocoInterface::get_wrench(const std::string& sitename) const
+{
+    _check_model();
+    const std::string function_name = error_msg_layout_ + "get_wrench";
+    const int force_id = impl_->_get_site_sensor_id(sitename, mjSENS_FORCE, "force", function_name);
+    const int torque_id = impl_->_get_site_sensor_id(sitename, mjSENS_TORQUE, "torque", function_name);
+    return impl_->read_state([&](const mjData* d) {
+        const mjtNum* f = impl_->_sensor_data(d, force_id);
+        const mjtNum* tau = impl_->_sensor_data(d, torque_id);
+        return DQ(0, f[0], f[1], f[2]) + E_*DQ(0, tau[0], tau[1], tau[2]);
+    });
+}
+
+/**
+ * @brief The normal force measured by a touch sensor (a MuJoCo touch sensor on its site)
+ * @param sitename The site of the sensor (e.g., added with DQ_MujocoSceneBuilder::add_touch_sensor()):
+ *        the contacts inside its volume are measured.
+ * @return The sum of the normal forces of those contacts, in N (zero without contact).
+ * @throws std::runtime_error If there is no such site, or it has no touch sensor
+ */
+double DQ_MujocoInterface::get_touch(const std::string& sitename) const
+{
+    _check_model();
+    const int id = impl_->_get_site_sensor_id(sitename, mjSENS_TOUCH, "touch", error_msg_layout_ + "get_touch");
+    return impl_->read_state([&](const mjData* d) { return impl_->_sensor_data(d, id)[0]; });
+}
+
+/**
+ * @brief The distance measured by a rangefinder (a MuJoCo rangefinder on its site)
+ * @param sitename The site of the rangefinder (e.g., added with
+ *        DQ_MujocoSceneBuilder::add_rangefinder()), which measures along its z axis.
+ * @return The distance to the first geometry along the z axis of the site, in m, or -1 if there is
+ *         none. Geometries of the body of the site are not seen.
+ * @throws std::runtime_error If there is no such site, or it has no rangefinder
+ */
+double DQ_MujocoInterface::get_range(const std::string& sitename) const
+{
+    _check_model();
+    const int id = impl_->_get_site_sensor_id(sitename, mjSENS_RANGEFINDER, "rangefinder",
+                                              error_msg_layout_ + "get_range");
+    return impl_->read_state([&](const mjData* d) { return impl_->_sensor_data(d, id)[0]; });
 }
 
 

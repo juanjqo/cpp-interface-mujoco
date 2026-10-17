@@ -23,6 +23,8 @@ namespace DQ_robotics_extensions
  * - Joints: FL_hip, FL_knee, FR_hip, FR_knee, RL_hip, RL_knee, RR_hip, RR_knee (front/rear,
  *   left/right), all about the y axis and driven by position actuators.
  * - End effectors: the sites FL_foot, FR_foot, RL_foot, RR_foot, at the center of each foot.
+ * - IMU: the site imu (imu_site), at the center of the trunk, for get_imu_orientation(),
+ *   get_imu_angular_velocity() and get_imu_linear_acceleration().
  * - Keyframe "home": standing on the floor, with the actuators holding the pose.
  * - kinematics(): the DQ Robotics model of each leg, in the trunk frame (see kinematics()).
  *

@@ -50,6 +50,9 @@ struct DQ_MujocoRobotDescription
 
     /// Sites at the end effectors (e.g., the feet of a legged robot), for get_site_pose().
     std::vector<std::string> end_effector_sites;
+    /// Site of the IMU of the robot (e.g., on its floating base), for get_imu_orientation(),
+    /// get_imu_angular_velocity() and get_imu_linear_acceleration(). Empty if it has none.
+    std::string imu_site;
 };
 
 }

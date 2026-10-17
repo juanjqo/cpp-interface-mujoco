@@ -57,7 +57,17 @@ public:
     Impl& operator=(const Impl&) = delete;
 
     mjsBody* world() const;
+    // The body of the scene with that name, or the world if the name is empty
+    mjsBody* body_or_world(const std::string& name, const std::string& function_name) const;
     void check_name_is_free(const mjtObj& type, const std::string& name) const;
+
+    // Adds the site of a sensor to the body parent_body (or the world), checking that its name, and
+    // the names of its sensors (name + each suffix), are free
+    mjsSite* add_sensor_site(const std::string& name, const DQ_robotics::DQ& pose,
+                             const std::string& parent_body, const std::vector<std::string>& sensor_suffixes,
+                             const std::string& function_name);
+    // Adds a sensor of the given type to a site, named name
+    mjsSensor* add_site_sensor(const std::string& name, const mjtSensor& type, const std::string& site_name);
 
     void add_primitive(const std::string& name, const DQ_robotics::DQ& pose, const mjtGeom& type,
                        const double size[3], const BODY& body, const Eigen::Vector4d& rgba,

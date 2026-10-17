@@ -32,6 +32,7 @@ DQ_MujocoRobotDescription GenericQuadrupedRobot::description()
                          "RL_hip", "RL_knee", "RR_hip", "RR_knee"};
     robot.home_keyframe = "home";
     robot.end_effector_sites = {"FL_foot", "FR_foot", "RL_foot", "RR_foot"};
+    robot.imu_site = "imu";
     return robot;
 }
 

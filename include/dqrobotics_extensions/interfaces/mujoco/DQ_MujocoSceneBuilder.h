@@ -119,6 +119,15 @@ public:
                   const double& size = 0.02,
                   const Eigen::Vector4d& rgba = Eigen::Vector4d(1.0, 0.0, 0.0, 0.5));
 
+    // Sensors, on a body of the scene (e.g., of a robot, with its prefixed name) or in the world. Each
+    // one is a site, named name, with MuJoCo sensors: read them with DQ_MujocoInterface::get_imu_*(name),
+    // get_wrench(name), get_touch(name) and get_range(name)
+    void add_imu(const std::string& name, const DQ_robotics::DQ& pose, const std::string& parent_body = "");
+    void add_force_torque_sensor(const std::string& name, const DQ_robotics::DQ& pose, const std::string& body);
+    void add_touch_sensor(const std::string& name, const DQ_robotics::DQ& pose,
+                          const Eigen::Vector3d& half_sizes, const std::string& parent_body = "");
+    void add_rangefinder(const std::string& name, const DQ_robotics::DQ& pose, const std::string& parent_body = "");
+
     // Robots of the robots library (or any robot described by a DQ_MujocoRobotDescription), in the
     // world or mounted on a body of the scene (e.g., an arm on a quadruped)
     DQ_MujocoRobotDescription add_robot(const DQ_MujocoRobotDescription& robot,
@@ -126,7 +135,8 @@ public:
                                         const DQ_robotics::DQ& pose = DQ_robotics::DQ(1),
                                         const std::string& parent_body = "");
 
-    // Remove an object, a site, a light, the floor, or a robot (by the prefixed name of its root body)
+    // Remove an object, a site, a sensor (by its site), a light, the floor, or a robot (by the prefixed
+    // name of its root body)
     void remove(const std::string& name);
 
     DQ_MujocoModel build() const;

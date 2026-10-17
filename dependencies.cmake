@@ -9,7 +9,7 @@ set(MUJOCO_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(MUJOCO_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(MUJOCO_BUILD_SIMULATE OFF CACHE BOOL "" FORCE)
 
-set(MUJOCO_VERSION "3.9.0")
+set(MUJOCO_VERSION "3.16.0")
 
 # Prevent MuJoCo from creating Eigen3::Eigen target
 set(MUJOCO_TEST_PYTHON_UTIL OFF CACHE BOOL "Disable Python util to prevent Eigen3 target" FORCE)

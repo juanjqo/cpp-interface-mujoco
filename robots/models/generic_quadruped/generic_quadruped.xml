@@ -13,6 +13,9 @@
 
     The "home" keyframe stands the robot on the floor, and its ctrl makes the position
     actuators hold that pose.
+
+    The imu site, at the center of the trunk, is an IMU: it has an orientation sensor, a
+    gyroscope and an accelerometer.
   -->
   <compiler angle="radian" autolimits="true"/>
 
@@ -129,6 +132,12 @@
     <position name="RR_hip"  joint="RR_hip"  class="leg"/>
     <position name="RR_knee" joint="RR_knee" class="leg"/>
   </actuator>
+
+  <sensor>
+    <framequat name="imu_orientation" objtype="site" objname="imu"/>
+    <gyro name="imu_angular_velocity" site="imu"/>
+    <accelerometer name="imu_linear_acceleration" site="imu"/>
+  </sensor>
 
   <keyframe>
     <!-- trunk height = 0.247 (legs) + 0.022 (foot radius) -->

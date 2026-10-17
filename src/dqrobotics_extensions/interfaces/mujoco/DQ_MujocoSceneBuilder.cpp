@@ -238,6 +238,42 @@ mjsBody* DQ_MujocoSceneBuilder::Impl::world() const
     return mjs_findBody(spec_, "world");
 }
 
+mjsBody* DQ_MujocoSceneBuilder::Impl::body_or_world(const std::string& name, const std::string& function_name) const
+{
+    if (name.empty())
+        return world();
+    mjsBody* body = mjs_findBody(spec_, name.c_str());
+    if (!body)
+        throw std::invalid_argument(function_name + ". There is no body \"" + name + "\" in the scene.");
+    return body;
+}
+
+mjsSite* DQ_MujocoSceneBuilder::Impl::add_sensor_site(const std::string& name, const DQ& pose,
+                                                     const std::string& parent_body,
+                                                     const std::vector<std::string>& sensor_suffixes,
+                                                     const std::string& function_name)
+{
+    check_name_is_free(mjOBJ_SITE, name);
+    for (const auto& suffix : sensor_suffixes)
+        check_name_is_free(mjOBJ_SENSOR, name + suffix);
+    mjsBody* parent = body_or_world(parent_body, function_name);
+    mjsSite* site = mjs_addSite(parent, nullptr);
+    mjs_setName(site->element, name.c_str());
+    set_pose(site->pos, site->quat, pose, function_name);
+    return site;
+}
+
+mjsSensor* DQ_MujocoSceneBuilder::Impl::add_site_sensor(const std::string& name, const mjtSensor& type,
+                                                        const std::string& site_name)
+{
+    mjsSensor* sensor = mjs_addSensor(spec_);
+    mjs_setName(sensor->element, name.c_str());
+    sensor->type = type;
+    sensor->objtype = mjOBJ_SITE;
+    mjs_setString(sensor->objname, site_name.c_str());
+    return sensor;
+}
+
 void DQ_MujocoSceneBuilder::Impl::check_name_is_free(const mjtObj& type, const std::string& name) const
 {
     if (name.empty())
@@ -289,9 +325,7 @@ DQ_MujocoRobotDescription DQ_MujocoSceneBuilder::Impl::add_robot(const DQ_Mujoco
         throw std::invalid_argument(function_name + ". The prefix cannot be empty.");
     if (!is_unit(pose))
         throw std::invalid_argument(function_name + ". The pose must be a unit dual quaternion!");
-    mjsBody* parent = parent_body.empty() ? world() : mjs_findBody(spec_, parent_body.c_str());
-    if (!parent)
-        throw std::invalid_argument(function_name + ". There is no body \"" + parent_body + "\" in the scene.");
+    mjsBody* parent = body_or_world(parent_body, function_name);
     const bool in_the_world = parent == world();
 
     // Parse the robot into its own specification (the attach moves its elements into the scene)
@@ -465,6 +499,7 @@ DQ_MujocoRobotDescription DQ_MujocoSceneBuilder::Impl::add_robot(const DQ_Mujoco
     placed.home_keyframe = home_keyframe_name_;
     for (const auto& name : robot.end_effector_sites)
         placed.end_effector_sites.push_back(prefix + name);
+    placed.imu_site = robot.imu_site.empty() ? "" : prefix + robot.imu_site;
     return placed;
 }
 
@@ -476,6 +511,19 @@ void DQ_MujocoSceneBuilder::Impl::remove(const std::string& name)
     {
         if (mjsElement* element = mjs_findElement(spec_, type, name.c_str()))
         {
+            // The sensors of a site go with it (those of the sites of a body are removed with it)
+            if (type == mjOBJ_SITE)
+            {
+                std::vector<mjsElement*> sensors;
+                for (mjsElement* e = mjs_firstElement(spec_, mjOBJ_SENSOR); e; e = mjs_nextElement(spec_, e))
+                {
+                    const mjsSensor* sensor = mjs_asSensor(e);
+                    if (sensor->objtype == mjOBJ_SITE && mjs_getString(sensor->objname) == name)
+                        sensors.push_back(e);
+                }
+                for (mjsElement* e : sensors)
+                    mjs_delete(spec_, e);
+            }
             mjs_delete(spec_, element);
             home_free_pose_.erase(name);
             return;
@@ -801,6 +849,123 @@ void DQ_MujocoSceneBuilder::add_site(const std::string& name, const DQ& pose, co
 }
 
 /**
+ * @brief Add an IMU: a site with an orientation sensor, a gyroscope and an accelerometer (MuJoCo
+ *        framequat, gyro and accelerometer sensors, named name + "_orientation",
+ *        "_angular_velocity" and "_linear_acceleration")
+ * @param name Name of the IMU (its site), to read it with DQ_MujocoInterface::get_imu_orientation(),
+ *        get_imu_angular_velocity() and get_imu_linear_acceleration().
+ * @param pose Pose of the IMU in the frame of parent_body (in the world if it is empty).
+ * @param parent_body The body that carries the IMU (e.g., the floating base of a robot, with its
+ *        prefixed name). MuJoCo does not compute accelerations of bodies welded to the world, so
+ *        an IMU on one measures zero acceleration.
+ * @throws std::invalid_argument If a name is in use, or there is no parent_body
+ */
+void DQ_MujocoSceneBuilder::add_imu(const std::string& name, const DQ& pose, const std::string& parent_body)
+{
+    const std::string function_name = error_msg_layout_ + "add_imu";
+    mjsSite* site = impl_->add_sensor_site(name, pose, parent_body,
+                                           {"_orientation", "_angular_velocity", "_linear_acceleration"},
+                                           function_name);
+    site->type = mjGEOM_BOX;
+    std::fill(site->size, site->size + 3, 0.01);
+    const float rgba[4] = {0.2f, 0.3f, 0.9f, 0.8f};
+    std::copy(rgba, rgba + 4, site->rgba);
+    impl_->add_site_sensor(name + "_orientation", mjSENS_FRAMEQUAT, name);
+    impl_->add_site_sensor(name + "_angular_velocity", mjSENS_GYRO, name);
+    impl_->add_site_sensor(name + "_linear_acceleration", mjSENS_ACCELEROMETER, name);
+}
+
+/**
+ * @brief Add a force/torque sensor: a site with MuJoCo force and torque sensors (named name +
+ *        "_force" and "_torque"), which measure the interaction between a body and its parent body
+ * @param name Name of the sensor (its site), to read it with DQ_MujocoInterface::get_wrench().
+ * @param pose Pose of the sensor in the frame of body: the frame of the measured wrench.
+ * @param body The measured body (e.g., the last link of an arm, "z1_link06", for a wrist sensor):
+ *        the sensor measures the wrench that its parent body exerts on it, so it holds what hangs
+ *        from it (the hand, and what it grasps).
+ * @throws std::invalid_argument If a name is in use, or there is no body with that name (the world
+ *         has no parent, so it is not valid)
+ */
+void DQ_MujocoSceneBuilder::add_force_torque_sensor(const std::string& name, const DQ& pose, const std::string& body)
+{
+    const std::string function_name = error_msg_layout_ + "add_force_torque_sensor";
+    if (body.empty() || body == "world")
+        throw std::invalid_argument(function_name + ". The sensor must be on a body other than the world.");
+    mjsSite* site = impl_->add_sensor_site(name, pose, body, {"_force", "_torque"}, function_name);
+    site->type = mjGEOM_CYLINDER;
+    site->size[0] = 0.015;
+    site->size[1] = 0.005;
+    const float rgba[4] = {0.9f, 0.5f, 0.1f, 0.8f};
+    std::copy(rgba, rgba + 4, site->rgba);
+    impl_->add_site_sensor(name + "_force", mjSENS_FORCE, name);
+    impl_->add_site_sensor(name + "_torque", mjSENS_TORQUE, name);
+}
+
+/**
+ * @brief Add a touch sensor: a box-shaped site with a MuJoCo touch sensor (named name + "_touch"),
+ *        which measures the normal force of the contacts inside the box
+ * @param name Name of the sensor (its site), to read it with DQ_MujocoInterface::get_touch().
+ * @param pose Pose of the center of the box in the frame of parent_body (in the world if it is
+ *        empty).
+ * @param half_sizes Half of the size of the box along its x, y and z axes, in meters. The box must
+ *        contain the contact points: e.g., around a foot, larger than the foot.
+ * @param parent_body The body whose contacts are measured (e.g., the foot of a robot). Only the
+ *        contacts of the geometries of that body count.
+ * @throws std::invalid_argument If a name is in use, a size is not positive, or there is no
+ *         parent_body
+ */
+void DQ_MujocoSceneBuilder::add_touch_sensor(const std::string& name, const DQ& pose, const Vector3d& half_sizes,
+                                             const std::string& parent_body)
+{
+    const std::string function_name = error_msg_layout_ + "add_touch_sensor";
+    if ((half_sizes.array() <= 0).any())
+        throw std::invalid_argument(function_name + ". The sizes must be positive.");
+    mjsSite* site = impl_->add_sensor_site(name, pose, parent_body, {"_touch"}, function_name);
+    site->type = mjGEOM_BOX;
+    for (int k = 0; k < 3; k++)
+        site->size[k] = half_sizes(k);
+    const float rgba[4] = {0.2f, 0.9f, 0.2f, 0.15f};
+    std::copy(rgba, rgba + 4, site->rgba);
+    impl_->add_site_sensor(name + "_touch", mjSENS_TOUCH, name);
+}
+
+/**
+ * @brief Add a rangefinder: a site with a MuJoCo rangefinder (named name + "_range"), which measures
+ *        the distance to the first geometry along the z axis of the site
+ * @param name Name of the rangefinder (its site), to read it with DQ_MujocoInterface::get_range().
+ * @param pose Pose of the rangefinder in the frame of parent_body (in the world if it is empty): it
+ *        measures along its z axis.
+ * @param parent_body The body that carries it (e.g., the base of a robot). The geometries of that
+ *        body are not seen. In the world, the rangefinder gets its own fixed body (named name), so
+ *        that it sees the floor and the other geometries of the world.
+ * @throws std::invalid_argument If a name is in use, or there is no parent_body
+ */
+void DQ_MujocoSceneBuilder::add_rangefinder(const std::string& name, const DQ& pose, const std::string& parent_body)
+{
+    const std::string function_name = error_msg_layout_ + "add_rangefinder";
+    std::string body = parent_body;
+    DQ site_pose = pose;
+    if (parent_body.empty())
+    {
+        impl_->check_name_is_free(mjOBJ_SITE, name);  // before adding its body
+        impl_->check_name_is_free(mjOBJ_SENSOR, name + "_range");
+        impl_->check_name_is_free(mjOBJ_BODY, name);
+        mjsBody* own_body = mjs_addBody(impl_->world(), nullptr);
+        mjs_setName(own_body->element, name.c_str());
+        set_pose(own_body->pos, own_body->quat, pose, function_name);
+        body = name;
+        site_pose = DQ(1);
+    }
+    mjsSite* site = impl_->add_sensor_site(name, site_pose, body, {"_range"}, function_name);
+    site->type = mjGEOM_SPHERE;
+    site->size[0] = 0.01;
+    const float rgba[4] = {0.9f, 0.1f, 0.1f, 0.8f};
+    std::copy(rgba, rgba + 4, site->rgba);
+    mjsSensor* sensor = impl_->add_site_sensor(name + "_range", mjSENS_RANGEFINDER, name);
+    sensor->intprm[0] = 1 << mjRAYDATA_DIST;  // the distance only (as the XML does by default)
+}
+
+/**
  * @brief Add a robot, e.g., one of the robots library
  * @param robot The robot (GenericQuadrupedRobot::description(), ...).
  * @param prefix Prefix added to every name of the robot, so that several robots can be added (e.g.,
@@ -846,10 +1011,11 @@ DQ_MujocoRobotDescription DQ_MujocoSceneBuilder::add_robot(const DQ_MujocoRobotD
 }
 
 /**
- * @brief Remove an object, a site, a light, the floor, or a robot
- * @param name Its name. For a robot, the name of its root body with the prefix (e.g., "arm_base" or,
- *        for a floating-base robot, its floating base, e.g., "dog_trunk"): its joints and actuators
- *        are removed with it.
+ * @brief Remove an object, a site, a sensor, a light, the floor, or a robot
+ * @param name Its name. For a sensor, the name of its site (e.g., of an IMU added with add_imu()). For
+ *        a robot, the name of its root body with the prefix (e.g., "arm_base" or, for a
+ *        floating-base robot, its floating base, e.g., "dog_trunk"): its joints, actuators and
+ *        sensors are removed with it.
  * @throws std::invalid_argument If there is nothing with that name
  */
 void DQ_MujocoSceneBuilder::remove(const std::string& name)

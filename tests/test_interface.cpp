@@ -1095,6 +1095,206 @@ static void edit_scene_with_window()
     CHECK(glfw_errors == 0);
 }
 
+/*********************************************
+ * SENSORS
+ * *******************************************/
+
+// A model with sensors in its XML: a 2 kg weight hanging from a hinge under a force/torque sensor, a
+// 1 kg ball with an IMU, a 3 kg crate on a touch pad, and a rangefinder 0.5 m above the floor
+static DQ_MujocoModel sensors_model()
+{
+    DQ_MujocoModel model;
+    model.name = "sensors.xml";
+    model.xml = R"(<mujoco>
+      <worldbody>
+        <geom name="floor" type="plane" size="0 0 1"/>
+        <body name="hanger" pos="0 0 1">
+          <body name="weight" pos="0 0 -0.2">
+            <joint name="hinge" axis="0 1 0" damping="5"/>
+            <site name="ft"/>
+            <site name="ft_turned" pos="0.1 0 0" quat="0.9800666 0 0.1986693 0"/>
+            <geom type="sphere" size="0.05" pos="0 0 -0.1" mass="2"/>
+          </body>
+        </body>
+        <body name="ball" pos="0 2 0.05">
+          <freejoint/>
+          <geom type="sphere" size="0.05" mass="1"/>
+          <site name="imu"/>
+        </body>
+        <body name="pad" pos="1 0 0.05">
+          <geom type="box" size="0.1 0.1 0.05"/>
+          <site name="pad_touch" pos="0 0 0.05" type="box" size="0.1 0.1 0.01"/>
+        </body>
+        <body name="crate" pos="1 0 0.15">
+          <freejoint/>
+          <geom type="box" size="0.05 0.05 0.05" mass="3"/>
+        </body>
+        <body name="ranger" pos="-1 0 0.5">
+          <site name="range" quat="0 1 0 0"/>
+        </body>
+      </worldbody>
+      <sensor>
+        <force name="ft_force" site="ft"/>
+        <torque name="ft_torque" site="ft"/>
+        <force name="ft_turned_force" site="ft_turned"/>
+        <torque name="ft_turned_torque" site="ft_turned"/>
+        <framequat name="imu_quat" objtype="site" objname="imu"/>
+        <gyro name="imu_gyro" site="imu"/>
+        <accelerometer name="imu_acc" site="imu"/>
+        <touch name="pad_touch" site="pad_touch"/>
+        <rangefinder name="range" site="range"/>
+        <jointpos name="hinge_angle" joint="hinge"/>
+      </sensor>
+    </mujoco>)";
+    return model;
+}
+
+// The size of the difference of two dual quaternions (zero if they are equal)
+static double error_of(const DQ& a)
+{
+    return vec8(a).norm();
+}
+
+static void sensors_of_a_model()
+{
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(sensors_model());
+    CHECK((mi.get_sensor_names() == std::vector<std::string>{"ft_force", "ft_torque", "ft_turned_force",
+                                                              "ft_turned_torque", "imu_quat", "imu_gyro",
+                                                              "imu_acc", "pad_touch", "range", "hinge_angle"}));
+    for (int i = 0; i < 1000; i++)
+        mi.trigger_next_simulation_step();
+    const double g = 9.81;
+
+    // At rest: the sensor holds the weight (the force of the hanger on the weight, upwards), the IMU
+    // measures gravity upwards, the pad holds the crate, and the floor is 0.5 m below the rangefinder
+    CHECK(error_of(mi.get_wrench("ft") - 2*g*k_) < 1e-3);
+    CHECK((mi.get_sensor_data("ft_force") - vec({0, 0, 2*g})).norm() < 1e-3);
+    CHECK(error_of(mi.get_imu_linear_acceleration("imu") - g*k_) < 1e-3);
+    CHECK(error_of(mi.get_imu_angular_velocity("imu")) < 1e-6);
+    CHECK(error_of(mi.get_imu_orientation("imu") - DQ(1)) < 1e-6);
+    CHECK(std::abs(mi.get_touch("pad_touch") - 3*g) < 1e-2);
+    CHECK_NEAR(mi.get_range("range"), 0.5);
+    CHECK(mi.get_sensor_data("hinge_angle").size() == 1);
+
+    // The same wrench, measured at another site (0.1 m along x, turned 0.4 rad about y): it is
+    // expressed in the frame of the site, at its origin, so the force rotates and there is a torque
+    // (the support is 0.1 m away from the site)
+    const DQ r_site = cos(0.2) + j_*sin(0.2);
+    const DQ f_world = 2*g*k_;
+    const DQ tau_world = cross(-0.1*i_, f_world);  // the force at the joint, about the site
+    const DQ wrench = mi.get_wrench("ft_turned");
+    CHECK(error_of(wrench.P() - conj(r_site)*f_world*r_site) < 1e-3);
+    CHECK(error_of(wrench.D() - conj(r_site)*tau_world*r_site) < 1e-3);
+
+    // In free fall, the accelerometer measures zero
+    mi.set_base_pose("ball", 1 + 0.5*E_*(2.0*j_ + 1.0*k_));
+    mi.trigger_next_simulation_step();
+    mi.trigger_next_simulation_step();
+    CHECK(error_of(mi.get_imu_linear_acceleration("imu")) < 1e-6);
+
+    // Errors: unknown sensors, and sites without that kind of sensor
+    CHECK_THROWS(std::runtime_error, mi.get_sensor_data("unknown"));
+    CHECK_THROWS(std::runtime_error, mi.get_imu_orientation("unknown"));
+    CHECK_THROWS(std::runtime_error, mi.get_imu_orientation("ft"));
+    CHECK_THROWS(std::runtime_error, mi.get_wrench("imu"));
+    CHECK_THROWS(std::runtime_error, mi.get_touch("range"));
+    CHECK_THROWS(std::runtime_error, mi.get_range("pad_touch"));
+}
+
+static void scene_builder_sensors()
+{
+    DQ_MujocoSceneBuilder builder;
+    builder.add_floor();
+    // An IMU on a crate, turned 90 degrees about x
+    builder.add_box("crate", 1 + 0.5*E_*(0.1*k_), {0.1, 0.1, 0.1}, BODY::FREE, {0.6, 0.4, 0.2, 1}, 3.0);
+    const DQ r_imu = cos(M_PI/4) + i_*sin(M_PI/4);
+    builder.add_imu("crate_imu", r_imu + 0.5*E_*(0.05*k_)*r_imu, "crate");
+    // A touch pad under a ball
+    builder.add_box("pad", 1 + 0.5*E_*(1.0*i_ + 0.05*k_), {0.1, 0.1, 0.05});
+    builder.add_touch_sensor("pad_touch", 1 + 0.5*E_*(0.05*k_), {0.1, 0.1, 0.01}, "pad");
+    builder.add_sphere("ball", 1 + 0.5*E_*(1.0*i_ + 0.15*k_), 0.05, BODY::FREE, {1, 0, 0, 1}, 2.0);
+    // A rangefinder in the world, 1 m above the floor, looking down
+    builder.add_rangefinder("ranger", i_ + 0.5*E_*(-1.0*i_ + 1.0*k_)*i_);
+    // A quadruped, with the IMU of its model, and an arm with a force/torque sensor at its wrist
+    const DQ_MujocoRobotDescription dog = builder.add_robot(GenericQuadrupedRobot::description(), "dog_",
+                                                            1 + 0.5*E_*(2.0*j_));
+    CHECK(dog.imu_site == "dog_imu");
+    const DQ_MujocoRobotDescription arm = builder.add_robot(GenericManipulatorRobot::description(), "arm_",
+                                                            1 + 0.5*E_*(-2.0*j_));
+    builder.add_force_torque_sensor("arm_wrist", DQ(1), "arm_link6");
+
+    // Errors
+    CHECK_THROWS(std::invalid_argument, builder.add_imu("crate_imu", DQ(1), "crate"));          // name in use
+    CHECK_THROWS(std::invalid_argument, builder.add_imu("imu2", DQ(1), "unknown"));
+    CHECK_THROWS(std::invalid_argument, builder.add_force_torque_sensor("ft", DQ(1), ""));      // not the world
+    CHECK_THROWS(std::invalid_argument, builder.add_touch_sensor("touch2", DQ(1), {0.1, 0, 0.1}));
+    CHECK_THROWS(std::invalid_argument, builder.add_rangefinder("ranger", DQ(1)));               // name in use
+
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(builder.build());
+    mi.reset_simulation("home");
+    for (int i = 0; i < 1000; i++)
+        mi.trigger_next_simulation_step();
+    const double g = 9.81;
+
+    // The crate rests: its IMU measures gravity upwards, in the frame of the IMU
+    CHECK(error_of(mi.get_imu_linear_acceleration("crate_imu") - g*(conj(r_imu)*k_*r_imu)) < 1e-2);
+    CHECK(error_of(mi.get_imu_orientation("crate_imu") - mi.get_base_pose("crate").P()*r_imu) < 1e-3);
+    // The pad holds the ball, and the floor is 1 m below the rangefinder
+    CHECK(std::abs(mi.get_touch("pad_touch") - 2*g) < 1e-2);
+    CHECK_NEAR(mi.get_range("ranger"), 1.0);
+    // The quadruped stands: its IMU measures gravity upwards, about along its z axis
+    const DQ a_dog = mi.get_imu_linear_acceleration(dog.imu_site);
+    CHECK(std::abs(a_dog.q(3) - g) < 0.2 && std::abs(a_dog.q(1)) < 0.5 && std::abs(a_dog.q(2)) < 0.5);
+    // The wrist holds the last link of the arm: the force is upwards, in the world
+    const DQ x_wrist = mi.get_site_pose("arm_wrist");
+    const DQ f_world = x_wrist.P()*mi.get_wrench("arm_wrist").P()*conj(x_wrist.P());
+    CHECK(f_world.q(3) > 0.1 && std::abs(f_world.q(1)) < 0.05*f_world.q(3) && std::abs(f_world.q(2)) < 0.05*f_world.q(3));
+
+    // Removing a sensor removes its MuJoCo sensors; removing a body removes those on it
+    auto names = mi.get_sensor_names();
+    CHECK(std::count(names.begin(), names.end(), "crate_imu_linear_acceleration") == 1);
+    builder.remove("crate_imu");
+    builder.remove("pad");
+    builder.remove("ranger");
+    mi.load_model(builder.build());
+    names = mi.get_sensor_names();
+    for (const auto& name : names)
+        CHECK(name.rfind("crate_imu", 0) != 0 && name.rfind("pad_touch", 0) != 0 && name.rfind("ranger", 0) != 0);
+    CHECK(std::count(names.begin(), names.end(), "arm_wrist_force") == 1);
+}
+
+static void edit_scene_sensors_while_running()
+{
+    // Sensors added while the simulation runs: an IMU on the trunk of a quadruped, and touch sensors
+    // on its feet
+    DQ_MujocoSceneBuilder builder;
+    builder.add_floor();
+    const DQ_MujocoRobotDescription dog = builder.add_robot(GenericQuadrupedRobot::description(), "dog_");
+    DQ_MujocoInterface mi(HEADLESS);
+    mi.load_model(builder.build());
+    mi.reset_simulation("home");
+    mi.start_simulation();
+    mi.edit_scene([&](DQ_MujocoSceneBuilder& scene) {
+        scene.add_imu("trunk_imu", DQ(1), dog.floating_base);
+        for (const std::string leg : {"FL", "FR", "RL", "RR"})
+            scene.add_touch_sensor(leg + "_touch", 1 + 0.5*E_*(-0.15*k_), {0.04, 0.04, 0.04},  // at the foot
+                                   "dog_" + leg + "_calf");
+    });
+    sleep_for(0.5);
+    // The IMU of the model and the new one measure the same; the feet hold the weight of the robot
+    CHECK(error_of(mi.get_imu_linear_acceleration("trunk_imu") - mi.get_imu_linear_acceleration(dog.imu_site)) < 1e-6);
+    double total = 0;
+    for (const std::string leg : {"FL", "FR", "RL", "RR"})
+    {
+        CHECK(mi.get_touch(leg + "_touch") > 0);
+        total += mi.get_touch(leg + "_touch");
+    }
+    mi.stop_simulation();
+    CHECK(std::abs(total - 8.875*9.81) < 5);  // the weight of the robot (8.875 kg), in N
+}
+
 static void scene_builder_mounted_robot()
 {
     // An arm mounted on the back of a quadruped: it is at home where it was mounted, and it moves with
@@ -1509,6 +1709,9 @@ int main(int argc, char** argv)
         {"generic_manipulator_kinematics", generic_manipulator_kinematics},
         {"generic_quadruped_kinematics", generic_quadruped_kinematics},
         {"scene_builder_mounted_robot", scene_builder_mounted_robot},
+        {"sensors_of_a_model", sensors_of_a_model},
+        {"scene_builder_sensors", scene_builder_sensors},
+        {"edit_scene_sensors_while_running", edit_scene_sensors_while_running},
         {"scene_builder_robot_with_meshes", scene_builder_robot_with_meshes},
         {"edit_scene_robot_with_meshes", edit_scene_robot_with_meshes},
     };

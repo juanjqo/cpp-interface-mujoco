@@ -128,6 +128,17 @@ public:
     DQ_robotics::DQ get_site_pose(const std::string& objectname) const;
     void set_site_pose(const std::string& objectname, const DQ_robotics::DQ& pose);
 
+    // Sensors (MuJoCo <sensor> elements, or added with DQ_MujocoSceneBuilder::add_imu(), ...), also
+    // while the simulation runs. Any sensor by its name, or the common ones by their site:
+    std::vector<std::string> get_sensor_names() const;
+    Eigen::VectorXd get_sensor_data(const std::string& sensorname) const;
+    DQ_robotics::DQ get_imu_orientation(const std::string& sitename) const;          // unit quaternion
+    DQ_robotics::DQ get_imu_angular_velocity(const std::string& sitename) const;     // in the IMU frame
+    DQ_robotics::DQ get_imu_linear_acceleration(const std::string& sitename) const;  // in the IMU frame
+    DQ_robotics::DQ get_wrench(const std::string& sitename) const;                   // f + E_*tau
+    double          get_touch(const std::string& sitename) const;                    // normal force
+    double          get_range(const std::string& sitename) const;                    // distance, -1: none
+
     // Reference frames: created at runtime and only drawn in the viewer (no XML, no physics)
     void add_reference_frame(const std::string& name,
                              const double& axis_length = 0.1,

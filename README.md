@@ -19,6 +19,8 @@ DQ Robotics can drive a MuJoCo simulation using joint names and dual-quaternion 
 - Task space: get and set the pose of any site, and get the pose of any body, as a unit dual quaternion
 - Floating-base robots (humanoids, quadrupeds): get and set the pose and twist of the base, reset to a keyframe, and
   make the camera follow the robot
+- Sensors: IMUs, force/torque sensors, touch sensors, rangefinders, and any MuJoCo sensor, read as DQ Robotics types
+  (orientations, wrenches), also while the simulation runs; add them to scenes in code
 - Reference frames: draw named frames at runtime from dual quaternion poses, without editing the XML model
 - Visualization toggles: wireframe, joint axes, contact forces, center of mass, site frames
 - Simulation reset, to the initial configuration or to a keyframe of the model
@@ -42,7 +44,7 @@ DQ Robotics can drive a MuJoCo simulation using joint names and dual-quaternion 
 
 | Dependency | How it is obtained |
 |---|---|
-| [MuJoCo](https://github.com/google-deepmind/mujoco) 3.9.0 | Downloaded and built automatically by CMake (`FetchContent`), and installed together with this library |
+| [MuJoCo](https://github.com/google-deepmind/mujoco) 3.16.0 | Downloaded and built automatically by CMake (`FetchContent`), and installed together with this library |
 | [sas_cpp](https://github.com/MarinhoLab/sas_cpp) (`marinholab_sas_core`) | Its `ThreadManager` runs the physics and viewer threads. The installed package is used if found (`libmarinholab-sas-core` from the SmartArmStack apt repository); otherwise it is downloaded and built automatically, and installed together with this library |
 | [DQ Robotics C++](https://github.com/dqrobotics/cpp) | Install manually (see below) |
 | Eigen3, GLFW, OpenGL | System packages |
@@ -147,6 +149,7 @@ cd ~/git/cpp-interface-mujoco/build/examples
 | [`site_poses`](examples/site_poses.cpp) | Moves a free-standing `target` frame with `set_site_pose` and reads the `end_effector` frame with `get_site_pose` |
 | [`reference_frames`](examples/reference_frames.cpp) | Draws desired, measured and fixed reference frames, plus a trail of past poses created and removed on the fly |
 | [`floating_base`](examples/floating_base.cpp) | A quadruped starts from its `home` keyframe, rocks its trunk with the leg actuators and gets pushed with `set_base_twist`; the camera follows it |
+| [`sensors`](examples/sensors.cpp) | Reads sensors in real time: the IMU of a quadruped, touch sensors on its feet and a rangefinder under its trunk while it bobs up and down, and a force/torque sensor on the wrist of an arm |
 | [`scene_builder`](examples/scene_builder.cpp) | Builds a scene in code (a table, two quadrupeds, an arm and a kinematic block moved with `set_body_pose`) and edits it while it runs in real time: a ball is dropped every 2 s and the oldest is removed; the arm's kinematics, moved to where it was placed, are drawn on its end effector |
 | [`twist_open_loop`](examples/twist_open_loop.cpp) | Stepped simulation paced by a sas `Clock`: commands a floating box with constant twists (no feedback) in `WORLD_FRAME` and `BODY_FRAME`, before every step: rise, orbit the world z axis, spin in place, drive in a circle, descend |
 
@@ -283,6 +286,45 @@ link moves with that link. The generic manipulator of the robots library
 ```
 
 Site frames are drawn in the viewer by default; hide them with `set_site_frame_view(false)`.
+
+### Sensors
+
+MuJoCo computes the [sensors](https://mujoco.readthedocs.io/en/stable/XMLreference.html#sensor) of a model at every
+step. Any sensor can be read by its name, and the common ones, as DQ Robotics types, by their site (like a real
+sensor, mounted somewhere), whatever the names of their MuJoCo sensors. Like the other getters, they read the
+latest step, also while the simulation runs.
+
+```cpp
+VectorXd v = mi.get_sensor_data("hinge_angle");               // any sensor, by name (get_sensor_names())
+DQ r      = mi.get_imu_orientation("dog_imu");                // unit quaternion (framequat), in the world
+DQ w      = mi.get_imu_angular_velocity("dog_imu");           // pure quaternion (gyro), in the IMU frame
+DQ a      = mi.get_imu_linear_acceleration("dog_imu");        // pure quaternion (accelerometer), in the IMU frame
+DQ wrench = mi.get_wrench("wrist");                           // f + E_*tau (force and torque sensors)
+double f  = mi.get_touch("FL_touch");                         // normal force, in N (touch)
+double d  = mi.get_range("height");                           // distance along the z axis of the site, in m, or -1
+```
+
+| Sensor | Measures | Conventions |
+|---|---|---|
+| IMU | orientation, angular velocity, linear acceleration | The acceleration includes gravity, as a real accelerometer: at rest it is 9.81 m/s² upwards, in free fall zero. MuJoCo does not compute accelerations of bodies welded to the world: mount IMUs on bodies that move |
+| Force/torque | the wrench that the parent body exerts on the body of the site | In the frame of the site, about its origin: a sensor at a wrist measures the weight of what hangs from it, upwards |
+| Touch | the normal force of the contacts inside the volume of the site | Only the contacts of the geometries of the body of the site |
+| Rangefinder | the distance to the first geometry along the z axis of the site | -1 if there is none. It does not see the geometries of its own body |
+
+The scene builder adds them, on any body of the scene (e.g., of a robot, with its prefixed name) or in the world,
+also while the simulation runs (`edit_scene()`). Each one is a site, named as the sensor, with its MuJoCo sensors
+(named after it, e.g., `wrist_force` and `wrist_torque`):
+
+```cpp
+scene.add_imu("trunk_imu", DQ(1), "dog_trunk");                                // pose relative to the body
+scene.add_force_torque_sensor("wrist", DQ(1), "arm_link6");                    // on the measured body
+scene.add_touch_sensor("FL_touch", 1 + 0.5*E_*(-0.15*k_), {0.04, 0.04, 0.04}, "dog_FL_calf");  // a box
+scene.add_rangefinder("height", x_down, "dog_trunk");                          // along its z axis
+scene.remove("trunk_imu");                                                     // with its MuJoCo sensors
+```
+
+Robots can have sensors in their models: the IMU of a robot is in `imu_site` of its description (e.g., the generic
+quadruped has one, prefixed by `add_robot()`: `"dog_imu"`).
 
 ### Floating-base robots
 
@@ -567,6 +609,9 @@ but not drawn.
 | `set_joint_positions(names, q)` | Teleport joints (no dynamics) |
 | `set_joint_target_positions/velocities/forces(names, u)` | Actuator commands |
 | `get_site_pose(name)` / `set_site_pose(name, x)` | Site pose as a unit dual quaternion |
+| `get_sensor_names()` / `get_sensor_data(name)` | Names of the sensors / values of any sensor, by name |
+| `get_imu_orientation/angular_velocity/linear_acceleration(site)` | An IMU, by its site: unit quaternion, and angular velocity and linear acceleration in its frame |
+| `get_wrench(site)` / `get_touch(site)` / `get_range(site)` | A force/torque sensor (`f + E_*tau`, in its frame), a touch sensor (N), a rangefinder (m, -1: nothing) |
 | `get_body_pose(name)` / `set_body_pose(name, x)` | Body pose as a unit dual quaternion / move a `KINEMATIC` body (a MuJoCo mocap body) |
 | `get_floating_base_names()` | Bodies with a free joint |
 | `get_base_pose(body)` / `set_base_pose(body, x)` | Floating-base pose as a unit dual quaternion (set: teleport) |
@@ -586,8 +631,11 @@ but not drawn.
 | `add_light(name, position, direction, directional)` | A spot or directional light |
 | `add_box/sphere/cylinder/capsule(name, x, sizes..., body, rgba, mass)` | A primitive object, `FIXED`, `KINEMATIC` or `FREE` |
 | `add_site(name, x, size, rgba)` | A site in the world (a frame without physics) |
+| `add_imu(name, x, parent)` / `add_rangefinder(name, x, parent)` | An IMU / a rangefinder (along its z axis), on a body (or in the world) |
+| `add_force_torque_sensor(name, x, body)` | A force/torque sensor on a body, which measures the wrench from its parent body |
+| `add_touch_sensor(name, x, half_sizes, parent)` | A touch sensor: the normal force of the contacts inside a box, on a body (or in the world) |
 | `add_robot(robot, prefix, x, parent)` | A robot (e.g., of the robots library), placed at `x` in the world, or mounted at `x` on the body `parent`; returns its description in the scene |
-| `remove(name)` | Remove an object, site, light, the floor, or a robot (by its prefixed root body) |
+| `remove(name)` | Remove an object, site, sensor (by its site), light, the floor, or a robot (by its prefixed root body) |
 | `build()` | The scene as a `DQ_MujocoModel`, with a "home" keyframe |
 
 ## License
