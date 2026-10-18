@@ -4,9 +4,6 @@
 
 An unofficial [DQ Robotics](https://dqrobotics.github.io) interface for C++17 to interact with [MuJoCo](https://mujoco.org).
 
-It wraps a MuJoCo model and viewer behind an API that mirrors `DQ_CoppeliaSimInterface`, so controllers written with
-DQ Robotics can drive a MuJoCo simulation using joint names and dual-quaternion poses.
-
 ## Features
 
 - Load an MJCF (XML) model from a file or from memory, and draw it in a GLFW window (mouse orbit/pan/zoom, FPS,
