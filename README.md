@@ -131,6 +131,21 @@ cmake --install build
 The first configure downloads and compiles MuJoCo, so it takes a few minutes. After updating the library (e.g.,
 `git pull`), build and install it again.
 
+### Debian package
+
+`debian/` builds the library as the Debian package `libdqrobotics-interface-mujoco` (the library, its headers, the CMake
+package and MuJoCo's `libmujoco.so`), the way the [SmartArmStack](https://github.com/SmartArmStack/smart_arm_stack_ROS2)
+apt repository builds its C++ libraries. With the prerequisites above, `libmarinholab-sas-core` and `devscripts`
+installed:
+
+```shell
+bash tools/bump-changelog.sh   # stamps the rolling version YY.MM.NN (tools/version.sh)
+dpkg-buildpackage -us -uc -b   # the .deb is written to the parent directory
+sudo apt install ../libdqrobotics-interface-mujoco_*.deb
+```
+
+The build downloads MuJoCo, like the CMake build, so it needs network access.
+
 ## Examples
 
 ```shell

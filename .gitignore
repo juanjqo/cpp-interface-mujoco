@@ -2,3 +2,11 @@ build/
 .qtcreator/
 *.user
 MUJOCO_LOG.TXT
+
+# Debian packaging build tree (dpkg-buildpackage)
+obj-*/
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/*.substvars
+debian/libdqrobotics-interface-mujoco/

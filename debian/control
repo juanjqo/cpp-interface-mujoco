@@ -1,0 +1,43 @@
+Source: libdqrobotics-interface-mujoco
+Section: libdevel
+Priority: optional
+Maintainer: Juan José Quiroz Omaña <juanjqogm@gmail.com>
+# MuJoCo (and the libraries it builds in) are downloaded by CMake's
+# FetchContent during the build (dependencies.cmake), so building needs
+# network access and ca-certificates for the HTTPS download.
+Build-Depends: debhelper-compat (= 13),
+ dpkg-dev (>= 1.18.11),
+ cmake,
+ g++,
+ ca-certificates,
+ libeigen3-dev,
+ libdqrobotics,
+ libmarinholab-sas-core,
+ libglfw3-dev,
+ libgl-dev,
+ libegl-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/juanjqo/cpp-interface-mujoco
+
+Package: libdqrobotics-interface-mujoco
+Architecture: any
+# The libraries are shared (upstream's default) and dpkg-shlibdeps finds
+# their system dependencies (GLFW, EGL, ...). libdqrobotics and
+# libmarinholab-sas-core ship from PPAs (DQ Robotics and SmartArmStack), so
+# they are declared here, unversioned. The CMake package needs Eigen's
+# headers and marinholab_sas_core's CMake package (find_dependency).
+Depends: libdqrobotics,
+ libmarinholab-sas-core,
+ libeigen3-dev,
+ ${shlibs:Depends},
+ ${misc:Depends}
+Description: Unofficial DQ Robotics interface for C++17 to interact with MuJoCo
+ cpp-interface-mujoco connects DQ Robotics (C++17) to MuJoCo: it loads and
+ builds scenes, runs the simulation in real time, and reads and commands
+ joints, bodies and cameras with dual quaternions.
+ .
+ This package ships the libraries, their headers, the CMake package
+ dqrobotics-interface-mujoco (targets dqrobotics_extensions::interface-mujoco
+ and dqrobotics_extensions::interface-mujoco-generic-robots, and
+ dq_mujoco_embed_model()), and the MuJoCo 3.16 shared library it is built
+ with (libmujoco.so), with the licenses of MuJoCo and its bundled libraries.
