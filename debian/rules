@@ -1,0 +1,28 @@
+#!/usr/bin/make -f
+
+# No distribution-wide LTO (Ubuntu's dpkg-buildflags adds -flto=auto).
+# dependencies.cmake hides the symbols of the libraries MuJoCo builds in
+# (tinyxml2, qhull, ...) with --exclude-libs, which the linker ignores for
+# LTO objects, so it builds those libraries without LTO. With -flto in
+# CFLAGS libmujoco.so exported tinyxml2 again, and every ROS 2 node that
+# loaded it crashed at startup (Fast DDS bound to MuJoCo's tinyxml2).
+# MuJoCo itself still enables LTO for its own sources, as upstream does.
+export DEB_BUILD_MAINT_OPTIONS = optimize=-lto
+
+export CFLAGS   := $(shell dpkg-buildflags --get CFLAGS)
+export CXXFLAGS := $(shell dpkg-buildflags --get CXXFLAGS)
+export CPPFLAGS := $(shell dpkg-buildflags --get CPPFLAGS)
+export LDFLAGS  := $(shell dpkg-buildflags --get LDFLAGS)
+
+%:
+	dh $@ --buildsystem=cmake
+
+# FETCHCONTENT_FULLY_DISCONNECTED=OFF: debhelper passes ON (no network
+# during Debian builds), but MuJoCo is fetched by dependencies.cmake.
+override_dh_auto_configure:
+	dh_auto_configure -- \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DFETCHCONTENT_FULLY_DISCONNECTED=OFF \
+		-DDQ_MUJOCO_BUILD_TESTS=OFF \
+		-DDQ_MUJOCO_BUILD_EXAMPLES=OFF

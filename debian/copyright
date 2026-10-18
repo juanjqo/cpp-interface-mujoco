@@ -1,0 +1,26 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: cpp-interface-mujoco
+Upstream-Contact: Juan José Quiroz Omaña <juanjqogm@gmail.com>
+Source: https://github.com/juanjqo/cpp-interface-mujoco
+Comment: The binary package also contains MuJoCo
+ (https://github.com/google-deepmind/mujoco, Apache-2.0) and the libraries
+ MuJoCo builds in, downloaded at build time. Their licenses are installed
+ in /usr/share/doc/dqrobotics-interface-mujoco/third_party/.
+
+Files: *
+Copyright: 2025-2026 Juan Jose Quiroz Omana
+License: LGPL-3.0+
+
+License: LGPL-3.0+
+ This package is free software; you can redistribute it and/or modify it
+ under the terms of the GNU Lesser General Public License as published by
+ the Free Software Foundation; either version 3 of the License, or (at
+ your option) any later version.
+ .
+ This package is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser
+ General Public License for more details.
+ .
+ On Debian systems, the complete text of the GNU Lesser General Public
+ License version 3 can be found in "/usr/share/common-licenses/LGPL-3".
