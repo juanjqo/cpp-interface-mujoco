@@ -3107,8 +3107,8 @@ bool DQ_MujocoInterface::is_gui_available()
  * The GUI surrounds the 3D view with docked panels, in the style of the editors of 3D tools:
  * - Scene: the tree of bodies, with a search box. Select a body to see its properties, here or by
  *   clicking it in the 3D view (Escape: none). The selected body and its children are highlighted.
- * - Properties: the pose of the selected body (position, rotation and unit dual quaternion), its
- *   mass, and a button to follow it with the camera.
+ * - Properties: the pose of the selected body (position and rotation), its mass, and a button
+ *   to follow it with the camera.
  * - Joints: the position (within its limits) and velocity of each hinge and slide joint.
  * - Sensors: the values of the sensors of the model.
  * - Visualization: rendering options, elements to show (joints, contacts, ...), frames, labels
