@@ -97,9 +97,10 @@ public:
 #ifdef DQ_MUJOCO_HAS_GUI
         if (_gui_active())
         {
-            gui_->on_mouse_button(button, action == GLFW_PRESS);
-            // A click on a panel is for the GUI, not for the camera
-            if (action == GLFW_PRESS && gui_->wants_mouse())
+            gui_->on_mouse_button(button, action == GLFW_PRESS, mods);
+            // A click on a panel is for the GUI, and Ctrl + drag drags the selected body (see
+            // _perturb()): not for the camera
+            if (action == GLFW_PRESS && (gui_->wants_mouse() || ((mods & GLFW_MOD_CONTROL) && gui_->has_selection())))
                 return;
         }
 #endif
@@ -218,6 +219,10 @@ public:
     std::unique_ptr<MujocoGui> gui_;
     MujocoGui::State gui_state_;  // only used by the viewer thread
 #endif
+    // Perturbation of a body with the mouse (Ctrl + drag in the GUI), protected by physics_mutex_:
+    // set by the viewer thread, applied before each step
+    mjvPerturb pert_;
+    bool perturb_force_applied_{false};
 
     // Camera thread (from the first start_camera() on): renders the cameras offscreen, with its own
     // OpenGL context. Its lock order: it takes physics_mutex_ to copy the state.
@@ -313,6 +318,7 @@ public:
         mjv_defaultOption(&opt_);
         mjv_defaultScene(&scn_);
         mjr_defaultContext(&con_);
+        mjv_defaultPerturb(&pert_);
     };
 
     /**
@@ -492,6 +498,8 @@ public:
         m_ = m;
         d_ = d;
         snapshot_ = snapshot;
+        mjv_defaultPerturb(&pert_);  // the bodies of the previous model
+        perturb_force_applied_ = false;
         spec_ = spec;
         vfs_ = std::move(vfs);
         camera_tracking_body_.clear();
@@ -672,6 +680,10 @@ public:
             throw std::runtime_error(std::string("Failed to apply the changes to the scene: ")
                                      + mjs_getError(spec_));
         _apply_visual_settings();
+        // The body ids can change: stop dragging any body
+        mjv_defaultPerturb(&pert_);
+        mju_zero(d_->xfrc_applied, 6 * m_->nbody);
+        perturb_force_applied_ = false;
 
         // The sizes of the model changed
         {
@@ -895,7 +907,7 @@ public:
             double simulation_time;
             {
                 std::lock_guard<std::mutex> physics_lock(physics_mutex_);
-                mjv_updateScene(m_, d_, &opt_, NULL, &cam_, mjCAT_ALL, &scn_);
+                mjv_updateScene(m_, d_, &opt_, &pert_, &cam_, mjCAT_ALL, &scn_);
                 simulation_time = d_->time;
 #ifdef DQ_MUJOCO_HAS_GUI
                 if (gui)
@@ -927,12 +939,22 @@ public:
                 {
                     // MuJoCo documents geomid, flexid and skinid as nullable, but mjv_select()
                     // writes them unconditionally
-                    mjtNum point[3];
+                    mjtNum point[3] = {0, 0, 0};
                     int geom_id = -1, flex_id = -1, skin_id = -1;
                     std::lock_guard<std::mutex> physics_lock(physics_mutex_);
-                    gui->select_body(mjv_select(m_, d_, &opt_, pick.aspect_ratio, pick.relx, pick.rely,
-                                                &scn_, point, &geom_id, &flex_id, &skin_id));
+                    const int body = mjv_select(m_, d_, &opt_, pick.aspect_ratio, pick.relx, pick.rely,
+                                                &scn_, point, &geom_id, &flex_id, &skin_id);
+                    // The clicked point in the body frame: where a drag holds the body
+                    mjtNum local_point[3] = {0, 0, 0};
+                    if (body > 0)
+                    {
+                        mjtNum offset[3];
+                        mju_sub3(offset, point, d_->xpos + 3 * body);
+                        mju_mulMatTVec3(local_point, d_->xmat + 9 * body, offset);
+                    }
+                    gui->select_body(body, local_point);
                 }
+                _perturb(gui->perturb_input());
                 mjr_render(viewport, &scn_, &con_);
                 gui->render();
                 gui_drawn = true;
@@ -1027,6 +1049,45 @@ public:
             _run_gui_requests();
 #endif
     }
+
+#ifdef DQ_MUJOCO_HAS_GUI
+    /**
+     * @brief _perturb drives MuJoCo's perturbation of the selected body with the mouse (Ctrl + drag
+     *        in the GUI). While the simulation steps, _step() pulls the body towards the mouse with
+     *        a spring force, so the dynamics respond (contacts, joints, controllers). While it does
+     *        not run in real time, free and kinematic bodies are also moved to the mouse at once,
+     *        as in a paused simulation. Viewer thread, with viewer_mutex_ held.
+     */
+    void _perturb(const MujocoGui::PerturbInput& input)
+    {
+        const bool moved = input.dx != 0 || input.dy != 0;
+        if (!input.start && !input.end && !moved && !pert_.active)
+            return;
+        std::lock_guard<std::mutex> lock(physics_mutex_);
+        if (input.start && input.body > 0 && input.body < m_->nbody)
+        {
+            pert_.select = input.body;
+            mju_copy3(pert_.localpos, input.localpos);
+            mjv_initPerturb(m_, d_, &scn_, &pert_);  // the reference is the current pose
+            pert_.active = input.active;
+        }
+        if (input.end)
+        {
+            pert_.active = 0;
+            pert_.select = 0;
+            return;
+        }
+        if (!pert_.active)
+            return;
+        if (moved)
+            mjv_movePerturb(m_, d_, input.action, input.dx, input.dy, &scn_, &pert_);
+        if (!simulation_running_)
+        {
+            mjv_applyPerturbPose(m_, d_, &pert_, 1);
+            mj_forward(m_, d_);
+        }
+    }
+#endif
 
     /**
      * @brief _gui_active whether the GUI is drawn (it exists and is enabled).
@@ -1144,6 +1205,20 @@ public:
      */
     void _step()
     {
+        // The body dragged with the mouse (GUI) is pulled towards the mouse by a spring force,
+        // and kinematic bodies follow it. The force is cleared when the drag ends.
+        if (pert_.active)
+        {
+            mju_zero(d_->xfrc_applied, 6 * m_->nbody);
+            mjv_applyPerturbPose(m_, d_, &pert_, 0);
+            mjv_applyPerturbForce(m_, d_, &pert_);
+            perturb_force_applied_ = true;
+        }
+        else if (perturb_force_applied_)
+        {
+            mju_zero(d_->xfrc_applied, 6 * m_->nbody);
+            perturb_force_applied_ = false;
+        }
         const auto start = std::chrono::high_resolution_clock::now();
         mj_step(m_, d_);
         const auto end = std::chrono::high_resolution_clock::now();
@@ -3107,6 +3182,10 @@ bool DQ_MujocoInterface::is_gui_available()
  * The GUI surrounds the 3D view with docked panels, in the style of the editors of 3D tools:
  * - Scene: the tree of bodies, with a search box. Select a body to see its properties, here or by
  *   clicking it in the 3D view (Escape: none). The selected body and its children are highlighted.
+ *   Ctrl + drag in the 3D view interacts with the selected body, as in MuJoCo's simulate: left
+ *   rotates it and right moves it (Shift: in the horizontal plane). While the simulation steps, a
+ *   spring force pulls the body towards the mouse, so the robot and its controller respond to it;
+ *   otherwise free and kinematic bodies are moved to the mouse at once.
  * - Properties: the pose of the selected body (position and rotation), its mass, and a button
  *   to follow it with the camera.
  * - Joints: the position (within its limits) and velocity of each hinge and slide joint.

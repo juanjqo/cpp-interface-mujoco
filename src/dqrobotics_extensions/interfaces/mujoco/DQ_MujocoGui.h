@@ -96,6 +96,22 @@ public:
     };
 
     /**
+     * @brief The mouse interaction with the selected body in the 3D view, in the last frame, for
+     *        MuJoCo's perturbation (mjv_initPerturb(), mjv_movePerturb()): Ctrl + left drag rotates
+     *        the body, Ctrl + right drag moves it (with Shift: in the horizontal plane).
+     */
+    struct PerturbInput
+    {
+        bool start = false;  // a drag started: perturb body, held at localpos (in the body frame)
+        bool end = false;    // the drag ended
+        int body = -1;
+        int active = 0;      // mjPERT_ROTATE or mjPERT_TRANSLATE
+        mjtNum localpos[3] = {0, 0, 0};
+        int action = mjMOUSE_NONE;  // the motion of the mouse in this frame, relative to the
+        double dx = 0, dy = 0;      // height of the 3D view
+    };
+
+    /**
      * @param content_scale Scale of the contents of the window (e.g., 2 on a high-DPI display).
      */
     explicit MujocoGui(const float& content_scale);
@@ -105,7 +121,7 @@ public:
     MujocoGui& operator=(const MujocoGui&) = delete;
 
     // Main thread: window events (GLFW key codes and modifiers, screen coordinates)
-    void on_mouse_button(const int& button, const bool& down);
+    void on_mouse_button(const int& button, const bool& down, const int& glfw_mods);
     void on_mouse_move(const double& x, const double& y);
     void on_scroll(const double& dx, const double& dy);
     void on_key(const int& glfw_key, const int& glfw_mods, const bool& down);
@@ -114,6 +130,8 @@ public:
     // Whether the GUI uses the mouse (it is over a panel), as of the last frame: the 3D view then
     // ignores it
     bool wants_mouse() const { return wants_mouse_; }
+    // Whether a body is selected: Ctrl + drag in the 3D view is then for the body, not the camera
+    bool has_selection() const { return has_selection_; }
     Requests take_requests();
 
     // Viewer thread, with the OpenGL context current and the viewer lock held
@@ -126,8 +144,10 @@ public:
 
     // Viewer thread, with the viewer lock held: the selected body (-1: none)
     int selected_body() const { return selected_body_; }
-    void select_body(const int& body);  // from the 3D view: the Scene panel reveals it
+    // From the 3D view (the Scene panel reveals it), with the clicked point in the body frame
+    void select_body(const int& body, const mjtNum local_point[3]);
     bool take_pick(Pick& pick);         // the last click in the 3D view, if any
+    const PerturbInput& perturb_input() const { return perturb_; }
     // Makes the geoms of the selected body and of its children glow, in the selection color (amber) (call it
     // after mjv_updateScene(), which makes the geoms of the frame)
     void highlight_selection(const mjModel* m, mjvScene& scn) const;
@@ -149,6 +169,7 @@ private:
     std::mutex events_mutex_;
     std::vector<Event> events_;
     std::atomic<bool> wants_mouse_{false};
+    std::atomic<bool> has_selection_{false};
 
     std::mutex requests_mutex_;
     Requests requests_;
@@ -159,6 +180,10 @@ private:
     bool click_in_view_ = false;     // the left button was pressed in the 3D view
     bool pick_requested_ = false;
     Pick pick_;
+    mjtNum picked_point_[3] = {0, 0, 0};  // the clicked point of picked_body_, in its frame
+    int picked_body_ = -1;
+    PerturbInput perturb_;
+    int perturb_button_ = -1;  // the button that drags the body (-1: none)
     bool show_scene_ = true;
     bool show_properties_ = true;
     bool show_joints_ = true;
