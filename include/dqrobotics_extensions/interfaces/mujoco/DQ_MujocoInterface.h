@@ -120,6 +120,12 @@ public:
     void set_site_frame_view(const bool& flag);
     void set_camera_tracking(const std::string& bodyname);
 
+    // GUI of the viewer (WINDOW mode): docked panels around the 3D view (scene tree, properties,
+    // joints, sensors, visualization options) and the simulation controls. Off by default.
+    static bool is_gui_available();
+    void set_gui_enabled(const bool& flag);
+    bool is_gui_enabled() const;
+
 
     void reset_simulation();
     void reset_simulation(const std::string& keyframe);

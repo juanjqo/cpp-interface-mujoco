@@ -14,6 +14,9 @@ Copyright 2021 DeepMind Technologies Limited, licensed under the Apache License,
 #include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h>
 #include "DQ_MujocoSceneBuilderImpl.h"
 #include "DQ_MujocoCameras.h"
+#ifdef DQ_MUJOCO_HAS_GUI
+#include "DQ_MujocoGui.h"
+#endif
 #include <set>
 #include <unordered_map>
 #include <mutex>
@@ -69,8 +72,37 @@ public:
         }
     }
 
+#ifdef DQ_MUJOCO_HAS_GUI
+    static void key_callback(GLFWwindow* window, int key, [[maybe_unused]] int scancode, int action, int mods) {
+        Impl* self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
+        if (self && self->_gui_active())
+            self->gui_->on_key(key, mods, action != GLFW_RELEASE);
+    }
+
+    static void char_callback(GLFWwindow* window, unsigned int codepoint) {
+        Impl* self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
+        if (self && self->_gui_active())
+            self->gui_->on_char(codepoint);
+    }
+
+    static void focus_callback(GLFWwindow* window, int focused) {
+        Impl* self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
+        if (self && self->_gui_active())
+            self->gui_->on_focus(focused == GLFW_TRUE);
+    }
+#endif
+
     // Mouse button handler
     void mouse_button(GLFWwindow* window, [[maybe_unused]] int button, [[maybe_unused]] int action, [[maybe_unused]] int mods) {
+#ifdef DQ_MUJOCO_HAS_GUI
+        if (_gui_active())
+        {
+            gui_->on_mouse_button(button, action == GLFW_PRESS);
+            // A click on a panel is for the GUI, not for the camera
+            if (action == GLFW_PRESS && gui_->wants_mouse())
+                return;
+        }
+#endif
         button_left_ = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS);
         button_middle_ = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS);
         button_right_ = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS);
@@ -79,6 +111,10 @@ public:
 
     // Mouse move handler
     void mouse_move(GLFWwindow* window, double xpos, double ypos) {
+#ifdef DQ_MUJOCO_HAS_GUI
+        if (_gui_active())
+            gui_->on_mouse_move(xpos, ypos);
+#endif
         if (!button_left_ && !button_middle_ && !button_right_)
             return;
         double dx = xpos - lastx_;
@@ -106,6 +142,14 @@ public:
 
     // Scroll handler
     void scroll([[maybe_unused]] GLFWwindow* window, double yoffset) {
+#ifdef DQ_MUJOCO_HAS_GUI
+        if (_gui_active())
+        {
+            gui_->on_scroll(0, yoffset);
+            if (gui_->wants_mouse())
+                return;  // scrolls a panel
+        }
+#endif
         std::lock_guard<std::mutex> lock(viewer_mutex_);
         mjv_moveCamera(m_, mjMOUSE_ZOOM, 0, 0.05 * yoffset, &cam_);
     }
@@ -162,7 +206,18 @@ public:
     bool viewer_has_context_{false};  // only used by the viewer thread
     std::atomic<int> framebuffer_width_{0};
     std::atomic<int> framebuffer_height_{0};
+    std::atomic<int> screen_width_{0};   // size of the window in screen coordinates (for the GUI)
+    std::atomic<int> screen_height_{0};
     steady_clock::time_point last_event_poll_;
+
+    // GUI of the viewer (set_gui_enabled()). gui_ is created by the main thread, under viewer_mutex_,
+    // and drawn by the viewer thread. Its requests (play, pause, step, reset) are run by the main
+    // thread in poll_events(), like calls of the user.
+    std::atomic<bool> gui_enabled_{false};
+#ifdef DQ_MUJOCO_HAS_GUI
+    std::unique_ptr<MujocoGui> gui_;
+    MujocoGui::State gui_state_;  // only used by the viewer thread
+#endif
 
     // Camera thread (from the first start_camera() on): renders the cameras offscreen, with its own
     // OpenGL context. Its lock order: it takes physics_mutex_ to copy the state.
@@ -271,6 +326,9 @@ public:
 
         // free visualization storage while the window (and its OpenGL context) still exists
         _free_visualization();
+#ifdef DQ_MUJOCO_HAS_GUI
+        gui_.reset();  // the OpenGL context is current in this thread (_free_visualization())
+#endif
 
         // close the window, and GLFW if this is the last interface using it
         if (window_) glfwDestroyWindow(window_);
@@ -511,6 +569,11 @@ public:
             glfwSetMouseButtonCallback(window_, &Impl::mouse_button_callback);
             glfwSetCursorPosCallback(window_, &Impl::mouse_move_callback);
             glfwSetScrollCallback(window_, &Impl::scroll_callback);
+#ifdef DQ_MUJOCO_HAS_GUI
+            glfwSetKeyCallback(window_, &Impl::key_callback);
+            glfwSetCharCallback(window_, &Impl::char_callback);
+            glfwSetWindowFocusCallback(window_, &Impl::focus_callback);
+#endif
         }
         glfwMakeContextCurrent(window_);
 
@@ -539,6 +602,14 @@ public:
         glfwGetFramebufferSize(window_, &framebuffer_width, &framebuffer_height);
         framebuffer_width_ = framebuffer_width;
         framebuffer_height_ = framebuffer_height;
+        int screen_width, screen_height;
+        glfwGetWindowSize(window_, &screen_width, &screen_height);
+        screen_width_ = screen_width;
+        screen_height_ = screen_height;
+#ifdef DQ_MUJOCO_HAS_GUI
+        if (gui_enabled_)
+            _create_gui();
+#endif
 
         last_time_ = std::chrono::high_resolution_clock::now();
         _start_viewer();
@@ -818,19 +889,43 @@ public:
 
         {
             std::lock_guard<std::mutex> viewer_lock(viewer_mutex_);
+#ifdef DQ_MUJOCO_HAS_GUI
+            MujocoGui* gui = gui_enabled_ ? gui_.get() : nullptr;
+#endif
             double simulation_time;
             {
                 std::lock_guard<std::mutex> physics_lock(physics_mutex_);
                 mjv_updateScene(m_, d_, &opt_, NULL, &cam_, mjCAT_ALL, &scn_);
                 simulation_time = d_->time;
+#ifdef DQ_MUJOCO_HAS_GUI
+                if (gui)
+                    gui_state_.copy(m_, d_);  // the panels are drawn without the physics lock
+#endif
             }
             for (const auto& [name, frame] : frames)
                 _draw_reference_frame(name, frame);
 
-            const mjrRect viewport = {0, 0, framebuffer_width_.load(), framebuffer_height_.load()};
+            mjrRect viewport = {0, 0, framebuffer_width_.load(), framebuffer_height_.load()};
+            bool gui_drawn = false;
+#ifdef DQ_MUJOCO_HAS_GUI
+            if (gui)
+            {
+                // The GUI fills the window and leaves the 3D view in the middle. The statistics
+                // replace the text overlay.
+                const MujocoGui::Statistics statistics{simulation_running_.load(), real_time_factor_.load(),
+                                                       fps_, avg_computation_time_microseconds_.load()};
+                viewport = gui->begin_frame({m_, gui_state_, opt_, scn_, cam_, camera_tracking_body_, statistics,
+                                             screen_width_.load(), screen_height_.load(),
+                                             viewport.width, viewport.height});
+                mjr_render(viewport, &scn_, &con_);
+                gui->render();
+                gui_drawn = true;
+            }
+            else
+#endif
             mjr_render(viewport, &scn_, &con_);
 
-            if (show_profiler_)
+            if (show_profiler_ && !gui_drawn)
             {
                 std::string text = "t: " + std::to_string(simulation_time) + "s";
                 mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, {viewport.width - 310, viewport.height - 210, 300, 200},
@@ -908,7 +1003,74 @@ public:
         glfwGetFramebufferSize(window_, &width, &height);
         framebuffer_width_ = width;
         framebuffer_height_ = height;
+        glfwGetWindowSize(window_, &width, &height);
+        screen_width_ = width;
+        screen_height_ = height;
+#ifdef DQ_MUJOCO_HAS_GUI
+        if (gui_)
+            _run_gui_requests();
+#endif
     }
+
+    /**
+     * @brief _gui_active whether the GUI is drawn (it exists and is enabled).
+     */
+    bool _gui_active() const
+    {
+#ifdef DQ_MUJOCO_HAS_GUI
+        return gui_ && gui_enabled_;
+#else
+        return false;
+#endif
+    }
+
+#ifdef DQ_MUJOCO_HAS_GUI
+    /**
+     * @brief _create_gui creates the GUI, if it does not exist yet and there is a window. Main
+     *        thread only (it asks GLFW for the content scale of the window).
+     */
+    void _create_gui()
+    {
+        if (gui_ || !window_)
+            return;
+        // Scale for high-DPI displays. Where the framebuffer is already larger than the window
+        // (macOS, Wayland), ImGui scales by that ratio itself.
+        float scale_x = 1, scale_y = 1;
+        glfwGetWindowContentScale(window_, &scale_x, &scale_y);
+        const float framebuffer_scale = screen_width_ > 0
+                                        ? static_cast<float>(framebuffer_width_) / screen_width_ : 1.0f;
+        auto gui = std::make_unique<MujocoGui>(scale_x / std::max(1.0f, framebuffer_scale));
+        std::lock_guard<std::mutex> lock(viewer_mutex_);
+        gui_ = std::move(gui);
+    }
+
+    /**
+     * @brief _run_gui_requests runs the actions asked in the GUI (play, pause, step, reset), as if
+     *        the user called the corresponding methods. Main thread only.
+     */
+    void _run_gui_requests()
+    {
+        const MujocoGui::Requests requests = gui_->take_requests();
+        try
+        {
+            if (requests.toggle_simulation)
+            {
+                if (simulation_running_)
+                    _stop_simulation();
+                else
+                    _start_simulation();
+            }
+            if (requests.step && !simulation_running_)
+                step_simulation();
+            if (requests.reset)
+                reset(requests.reset_keyframe);
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "DQ_MujocoInterface: the action of the GUI failed: " << e.what() << std::endl;
+        }
+    }
+#endif
 
     //----------------------------------------------------------------------------------------------
     // Physics thread
@@ -2907,6 +3069,66 @@ void DQ_MujocoInterface::set_camera_tracking(const std::string& bodyname)
     cam.trackbodyid = body_id;
     cam.type = mjCAMERA_TRACKING;
     cam.fixedcamid = -1;
+}
+
+/**
+ * @brief Whether this build of the library has the GUI of the viewer (see set_gui_enabled())
+ * @return false if the library was built with DQ_MUJOCO_BUILD_GUI=OFF.
+ */
+bool DQ_MujocoInterface::is_gui_available()
+{
+#ifdef DQ_MUJOCO_HAS_GUI
+    return true;
+#else
+    return false;
+#endif
+}
+
+/**
+ * @brief Show or hide the GUI of the viewer
+ * @param flag true to show the GUI, false to show only the 3D view (default).
+ *
+ * The GUI surrounds the 3D view with docked panels, in the style of the editors of 3D tools:
+ * - Scene: the tree of bodies, with a search box. Select a body to see its properties.
+ * - Properties: the pose of the selected body (position, rotation and unit dual quaternion), its
+ *   mass, and a button to follow it with the camera.
+ * - Joints: the position (within its limits) and velocity of each hinge and slide joint.
+ * - Sensors: the values of the sensors of the model.
+ * - Visualization: rendering options, elements to show (joints, contacts, ...), frames, labels
+ *   and groups.
+ * The menu bar has the simulation controls (play, pause, step, reset, reset to a keyframe) and the
+ * camera (free, following a body, or a camera of the model), and the status bar shows the
+ * simulation time, the real-time factor and the frame rate. The panels can be moved, docked
+ * elsewhere, or closed (View menu).
+ *
+ * The simulation controls act as the corresponding methods called by the program: play and pause
+ * are start_simulation() and stop_simulation(), and step is trigger_next_simulation_step(). They run
+ * in the main thread, in should_close_window(). Keys: Space (play/pause), Right (step), Backspace
+ * (reset).
+ *
+ * Call it from the main thread, before or after load_model(). In HEADLESS mode it has no effect.
+ *
+ * @throws std::runtime_error If flag is true and the library has no GUI (see is_gui_available())
+ */
+void DQ_MujocoInterface::set_gui_enabled(const bool& flag)
+{
+#ifdef DQ_MUJOCO_HAS_GUI
+    impl_->gui_enabled_ = flag;
+    if (flag)
+        impl_->_create_gui();
+#else
+    if (flag)
+        throw std::runtime_error(error_msg_layout_ + "set_gui_enabled. This build of the library has no GUI "
+                                 "(it was built with DQ_MUJOCO_BUILD_GUI=OFF).");
+#endif
+}
+
+/**
+ * @brief Whether the GUI of the viewer is enabled (see set_gui_enabled())
+ */
+bool DQ_MujocoInterface::is_gui_enabled() const
+{
+    return impl_->gui_enabled_;
 }
 
 /**

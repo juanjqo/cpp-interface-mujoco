@@ -48,3 +48,10 @@ jobs:
           test -f "${{ runner.temp }}/install/lib/cmake/dqrobotics-interface-mujoco/DQMujocoEmbedModel.cmake"
           test -f "${{ runner.temp }}/install/share/doc/dqrobotics-interface-mujoco/LICENSE"
           test -f "${{ runner.temp }}/install/share/doc/dqrobotics-interface-mujoco/third_party/mujoco/LICENSE"
+          test -f "${{ runner.temp }}/install/share/doc/dqrobotics-interface-mujoco/third_party/imgui/LICENSE.txt"
+          test -f "${{ runner.temp }}/install/share/doc/dqrobotics-interface-mujoco/third_party/roboto/NOTICE"
+          # Dear ImGui is built into the library: no headers installed, no symbols exported
+          test ! -e "${{ runner.temp }}/install/include/imgui.h"
+          if nm -D --defined-only "${{ runner.temp }}"/install/lib/libdqrobotics-interface-mujoco.so | c++filt | grep -q "ImGui::"; then
+            echo "libdqrobotics-interface-mujoco.so exports ImGui symbols"; exit 1
+          fi

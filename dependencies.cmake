@@ -36,6 +36,17 @@ if(UNIX AND NOT APPLE AND TARGET mujoco)
     endforeach()
 endif()
 
+# Dear ImGui (docking branch), for the GUI of the viewer. It is built into this library (see
+# CMakeLists.txt) and not installed. It has no CMakeLists.txt, so FetchContent only downloads it.
+if(DQ_MUJOCO_BUILD_GUI)
+    set(IMGUI_VERSION "1.93.0-docking")
+    FetchContent_Declare(
+        imgui
+        URL https://github.com/ocornut/imgui/archive/refs/tags/v${IMGUI_VERSION}.tar.gz
+    )
+    FetchContent_MakeAvailable(imgui)
+endif()
+
 set(MUJOCO_INCLUDE_DIR ${mujoco_SOURCE_DIR}/include)
 set(MUJOCO_LIB_DIR ${mujoco_SOURCE_DIR}/lib)
 

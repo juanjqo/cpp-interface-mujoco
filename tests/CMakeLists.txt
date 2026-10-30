@@ -82,6 +82,8 @@ set(TESTS
     camera_in_window_mode
     scene_builder_robot_with_meshes
     edit_scene_robot_with_meshes
+    gui_api
+    gui_in_window_mode
 )
 foreach(test_name IN LISTS TESTS)
     add_test(NAME ${test_name}
