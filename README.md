@@ -310,8 +310,10 @@ axes of the world (X, Y, Z), as in Blender: click an axis to look along it, or d
 
 Play/pause, step and reset (also with Space, Right and Backspace) act as `start_simulation()`/`stop_simulation()`,
 `trigger_next_simulation_step()` and `reset_simulation()`: they run in the main thread, in `should_close_window()`.
-So if the program steps the simulation with `trigger_next_simulation_step()`, playing it from the GUI makes those
-calls throw until it is paused again.
+In a program that steps the simulation itself with `trigger_next_simulation_step()`, the program is the clock: play and
+step are disabled in the GUI (playing would make the program's next step throw), and the status bar shows "Stepped by
+the program". Reset, selection, the gizmos and Ctrl + drag still work. They are enabled again if the program calls
+`start_simulation()`.
 
 The GUI is off by default, and has no effect in headless mode. `DQ_MujocoInterface::is_gui_available()` is `false`
 if the library was built with `-DDQ_MUJOCO_BUILD_GUI=OFF`; `set_gui_enabled(true)` then throws. The API is the same
