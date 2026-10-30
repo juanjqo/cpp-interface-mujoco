@@ -904,6 +904,10 @@ public:
             }
             for (const auto& [name, frame] : frames)
                 _draw_reference_frame(name, frame);
+#ifdef DQ_MUJOCO_HAS_GUI
+            if (gui)
+                gui->highlight_selection(m_, scn_);
+#endif
 
             mjrRect viewport = {0, 0, framebuffer_width_.load(), framebuffer_height_.load()};
             bool gui_drawn = false;
@@ -917,6 +921,18 @@ public:
                 viewport = gui->begin_frame({m_, gui_state_, opt_, scn_, cam_, camera_tracking_body_, statistics,
                                              screen_width_.load(), screen_height_.load(),
                                              viewport.width, viewport.height});
+                // A click in the 3D view selects the body under the cursor, in the scene as drawn
+                MujocoGui::Pick pick;
+                if (gui->take_pick(pick))
+                {
+                    // MuJoCo documents geomid, flexid and skinid as nullable, but mjv_select()
+                    // writes them unconditionally
+                    mjtNum point[3];
+                    int geom_id = -1, flex_id = -1, skin_id = -1;
+                    std::lock_guard<std::mutex> physics_lock(physics_mutex_);
+                    gui->select_body(mjv_select(m_, d_, &opt_, pick.aspect_ratio, pick.relx, pick.rely,
+                                                &scn_, point, &geom_id, &flex_id, &skin_id));
+                }
                 mjr_render(viewport, &scn_, &con_);
                 gui->render();
                 gui_drawn = true;
@@ -3089,7 +3105,8 @@ bool DQ_MujocoInterface::is_gui_available()
  * @param flag true to show the GUI, false to show only the 3D view (default).
  *
  * The GUI surrounds the 3D view with docked panels, in the style of the editors of 3D tools:
- * - Scene: the tree of bodies, with a search box. Select a body to see its properties.
+ * - Scene: the tree of bodies, with a search box. Select a body to see its properties, here or by
+ *   clicking it in the 3D view (Escape: none). The selected body and its children are highlighted.
  * - Properties: the pose of the selected body (position, rotation and unit dual quaternion), its
  *   mass, and a button to follow it with the camera.
  * - Joints: the position (within its limits) and velocity of each hinge and slide joint.

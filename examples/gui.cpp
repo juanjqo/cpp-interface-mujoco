@@ -12,8 +12,9 @@ GUI example.
 
 Shows the GUI of the viewer (set_gui_enabled()) with a scene built in code: an arm of the robots
 library, a quadruped (with the IMU of its model), a rangefinder, a camera, and a few free objects. Try:
-  - Scene panel: select a body (e.g., "dog_trunk") to see its pose, also as a unit dual quaternion,
-    in the Properties panel, and follow it with the camera.
+  - Scene panel, or a click in the 3D view: select a body (e.g., "dog_trunk", which highlights the
+    whole quadruped) to see its pose, also as a unit dual quaternion, in the Properties panel, and
+    follow it with the camera. Escape clears the selection.
   - Joints and Sensors panels: the joint positions within their limits, and the values of the
     IMU of the quadruped and of the rangefinder.
   - Visualization panel: contact forces, joint axes, frames, labels, ...

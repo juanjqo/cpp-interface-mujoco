@@ -284,7 +284,8 @@ mi.set_gui_enabled(true);  // before or after load_model()
 mi.load_model(scene.build());
 ```
 
-The GUI surrounds the 3D view with docked panels: **Scene** (the tree of bodies, with a search box), **Properties**
+The GUI surrounds the 3D view with docked panels: **Scene** (the tree of bodies, with a search box; select a body
+there or by clicking it in the 3D view, and it is highlighted with its children), **Properties**
 (the pose of the selected body: position, rotation and unit dual quaternion; its mass; follow it with the camera),
 **Joints** (positions within their limits, and velocities), **Sensors**, and **Visualization** (shadows, reflections,
 wireframe, joint axes, contact forces, frames, labels, groups, ...). The panels can be moved, docked elsewhere and
