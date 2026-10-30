@@ -178,7 +178,8 @@ cd ~/git/cpp-interface-mujoco/build/examples
 | [`gui`](examples/gui.cpp) | The GUI of the viewer with a scene built in code (an arm, a quadruped, a rangefinder, a camera and free objects): select bodies to see their poses, watch the joints and sensors, change the visualization options, and pause, step and reset the simulation from the menu bar |
 | [`twist_open_loop`](examples/twist_open_loop.cpp) | Stepped simulation paced by a sas `Clock`: commands a floating box with constant twists (no feedback) in `WORLD_FRAME` and `BODY_FRAME`, before every step: rise, orbit the world z axis, spin in place, drive in a circle, descend |
 
-The first three examples use `GenericManipulatorRobot`, a generic 6-DoF arm, `floating_base` uses
+All the examples show the [GUI](#gui) (`set_gui_enabled()`), if the library was built with it. The first three
+examples use `GenericManipulatorRobot`, a generic 6-DoF arm, `floating_base` uses
 `GenericQuadrupedRobot`, and `scene_builder` and `gui` use both, all from the
 [robots library](#robots-library), so they need no model files.
 `twist_open_loop` uses [`examples/models/floating_box.xml`](examples/models/floating_box.xml), a box with gravity

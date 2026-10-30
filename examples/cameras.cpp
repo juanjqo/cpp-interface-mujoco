@@ -82,6 +82,7 @@ int main(int argc, char** argv)
                      "", 45, 640, 480);
 
     DQ_MujocoInterface mi(headless ? DQ_MujocoInterface::RENDERING::HEADLESS : DQ_MujocoInterface::RENDERING::WINDOW);
+    mi.set_gui_enabled(DQ_MujocoInterface::is_gui_available());  // the GUI, if the library has it
     mi.load_model(scene.build());
     mi.reset_simulation("home");
 

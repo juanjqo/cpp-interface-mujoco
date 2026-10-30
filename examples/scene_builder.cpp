@@ -80,6 +80,7 @@ int main()
     const auto dog2 = scene.add_robot(GenericQuadrupedRobot::description(), "dog2_", x_dog2);
 
     DQ_MujocoInterface mi;
+    mi.set_gui_enabled(DQ_MujocoInterface::is_gui_available());  // the GUI, if the library has it
     mi.load_model(scene.build());
     mi.reset_simulation("home");  // every robot at its home configuration, where it was placed
     mi.set_site_frame_view(false);

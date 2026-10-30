@@ -55,6 +55,7 @@ int main()
     const DQ_MujocoRobotDescription robot = GenericQuadrupedRobot::description();
 
     DQ_MujocoInterface mi;
+    mi.set_gui_enabled(DQ_MujocoInterface::is_gui_available());  // the GUI, if the library has it
     mi.load_model(robot.model);
 
     const std::string& base = robot.floating_base;  // "trunk"
