@@ -56,7 +56,11 @@ ImVec4 color(const unsigned int& rgb, const float& alpha = 1.0f)
 }
 
 const unsigned int ACCENT = 0x4FA3E0;
-const unsigned int SELECTION = 0xFFB020;   // amber: stands out against the blue floor and robots
+const unsigned int SELECTION = 0xFFB020;
+
+const char* const STEPPED_BY_PROGRAM =
+    "The program steps the simulation (trigger_next_simulation_step()),\n"
+    "so it cannot be played or stepped from the GUI.";   // amber: stands out against the blue floor and robots
 const unsigned int BACKGROUND = 0x1F2125;  // also behind the 3D view while it is drawn
 const ImU32 AXIS_COLORS[4] = {IM_COL32(200, 70, 70, 255),    // x: red
                               IM_COL32(95, 165, 60, 255),    // y: green
@@ -1045,9 +1049,10 @@ void MujocoGui::_shortcuts(const Frame& frame)
     // Not while the user types in a text field
     if (ImGui::GetIO().WantTextInput)
         return;
-    if (ImGui::IsKeyPressed(ImGuiKey_Space, false))
+    const bool stepped = frame.statistics.stepped_by_program;
+    if (ImGui::IsKeyPressed(ImGuiKey_Space, false) && !stepped)
         _request({true, false, false, -1});
-    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, true) && !frame.statistics.running)
+    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, true) && !frame.statistics.running && !stepped)
         _request({false, true, false, -1});
     if (ImGui::IsKeyPressed(ImGuiKey_Backspace, false))
         _request({false, false, true, -1});
@@ -1074,15 +1079,20 @@ void MujocoGui::_menu_bar(const Frame& frame)
 {
     const mjModel* m = frame.m;
     const bool running = frame.statistics.running;
+    const bool stepped = frame.statistics.stepped_by_program;
     if (!ImGui::BeginMainMenuBar())
         return;
 
     if (ImGui::BeginMenu("Simulation"))
     {
-        if (ImGui::MenuItem(running ? "Pause" : "Play", "Space"))
+        if (ImGui::MenuItem(running ? "Pause" : "Play", "Space", false, !stepped))
             _request({true, false, false, -1});
-        if (ImGui::MenuItem("Step", "Right", false, !running))
+        if (stepped && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s", STEPPED_BY_PROGRAM);
+        if (ImGui::MenuItem("Step", "Right", false, !running && !stepped))
             _request({false, true, false, -1});
+        if (stepped && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s", STEPPED_BY_PROGRAM);
         ImGui::Separator();
         if (ImGui::MenuItem("Reset", "Backspace"))
             _request({false, false, true, -1});
@@ -1155,9 +1165,10 @@ void MujocoGui::_menu_bar(const Frame& frame)
     const float h = ImGui::GetFrameHeight();
     const float width = 3 * h * 1.4f + 2 * ImGui::GetStyle().ItemSpacing.x;
     ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), (ImGui::GetWindowWidth() - width) * 0.5f));
-    if (icon_button("##play", running ? Icon::PAUSE : Icon::PLAY, running ? "Pause (Space)" : "Play (Space)"))
+    if (icon_button("##play", running ? Icon::PAUSE : Icon::PLAY,
+                    stepped ? STEPPED_BY_PROGRAM : (running ? "Pause (Space)" : "Play (Space)"), !stepped))
         _request({true, false, false, -1});
-    if (icon_button("##step", Icon::STEP, "Step (Right)", !running))
+    if (icon_button("##step", Icon::STEP, stepped ? STEPPED_BY_PROGRAM : "Step (Right)", !running && !stepped))
         _request({false, true, false, -1});
     if (icon_button("##reset", Icon::RESET, "Reset (Backspace)"))
         _request({false, false, true, -1});
@@ -1175,8 +1186,23 @@ void MujocoGui::_status_bar(const Frame& frame)
     {
         if (ImGui::BeginMenuBar())
         {
-            status_dot(s.running ? IM_COL32(95, 190, 110, 255) : IM_COL32(220, 165, 60, 255));
-            ImGui::TextUnformatted(s.running ? "Running" : "Paused");
+            if (s.running)
+            {
+                status_dot(IM_COL32(95, 190, 110, 255));
+                ImGui::TextUnformatted("Running");
+            }
+            else if (s.stepped_by_program)
+            {
+                status_dot(ImGui::GetColorU32(color(ACCENT)));
+                ImGui::TextUnformatted("Stepped by the program");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", STEPPED_BY_PROGRAM);
+            }
+            else
+            {
+                status_dot(IM_COL32(220, 165, 60, 255));
+                ImGui::TextUnformatted("Paused");
+            }
             ImGui::TextDisabled("|");
             ImGui::Text("t = %.3f s", frame.state.time);
             if (s.running)

@@ -51,6 +51,9 @@ public:
     struct Statistics
     {
         bool running = false;
+        // The program steps the simulation (trigger_next_simulation_step()): the GUI cannot run it in
+        // real time (the program's next step would throw) nor step it
+        bool stepped_by_program = false;
         double real_time_factor = 0;
         double fps = 0;
         double step_time_us = 0;

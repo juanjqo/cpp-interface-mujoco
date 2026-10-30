@@ -184,6 +184,10 @@ public:
     // Physics thread
     std::unique_ptr<ThreadManager> physics_thread_;
     std::atomic<bool> simulation_running_{false};
+    // The program steps the simulation with trigger_next_simulation_step() (until it calls
+    // start_simulation()): the GUI must not start the real-time simulation, which would make the
+    // program's next step throw
+    std::atomic<bool> stepped_by_program_{false};
     double anchor_simulation_time_{0};          // simulation time and wall-clock time from which
     steady_clock::time_point anchor_wall_time_;  // the physics thread keeps real time
     std::atomic<int> max_steps_per_tick_{1};
@@ -950,8 +954,9 @@ public:
             {
                 // The GUI fills the window and leaves the 3D view in the middle. The statistics
                 // replace the text overlay.
-                const MujocoGui::Statistics statistics{simulation_running_.load(), real_time_factor_.load(),
-                                                       fps_, avg_computation_time_microseconds_.load()};
+                const MujocoGui::Statistics statistics{simulation_running_.load(), stepped_by_program_.load(),
+                                                       real_time_factor_.load(), fps_,
+                                                       avg_computation_time_microseconds_.load()};
                 viewport = gui->begin_frame({m_, gui_state_, opt_, scn_, cam_, camera_tracking_body_, statistics,
                                              screen_width_.load(), screen_height_.load(),
                                              viewport.width, viewport.height});
@@ -1279,14 +1284,16 @@ public:
         const MujocoGui::Requests requests = gui_->take_requests();
         try
         {
+            // A program that steps the simulation is its clock: the GUI does not run nor step it
+            // (a request sent before the program's first step is ignored here)
             if (requests.toggle_simulation)
             {
                 if (simulation_running_)
                     _stop_simulation();
-                else
+                else if (!stepped_by_program_)
                     _start_simulation();
             }
-            if (requests.step && !simulation_running_)
+            if (requests.step && !simulation_running_ && !stepped_by_program_)
                 step_simulation();
             if (requests.reset)
                 reset(requests.reset_keyframe);
@@ -2250,10 +2257,35 @@ void DQ_MujocoInterface::load_model(const DQ_MujocoModel& model)
 
 
 
+/**
+ * @brief Advance the simulation by one timestep (stepped simulation)
+ *
+ * Calls MuJoCo's mj_step() once: the simulation time advances by the timestep of the model
+ * (<option timestep="..."/>, 0.002 s by default), and the getters then read the state after the
+ * step. The commands (set_joint_target_*) written before the call are applied in it. It does not
+ * wait: to run in real time, pace the loop at the timestep (e.g., with a sas Clock); otherwise the
+ * simulation runs as fast as the computer allows. The viewer thread draws the window meanwhile.
+ * @code
+ * while (!mi.should_close_window())
+ * {
+ *     mi.set_joint_target_positions(joints, controller(mi.get_joint_positions(joints)));
+ *     mi.trigger_next_simulation_step();
+ *     clock.update_and_sleep();
+ * }
+ * @endcode
+ *
+ * Use it for deterministic experiments and per-step control; start_simulation() runs the
+ * simulation in real time instead. The program is then the clock of the simulation: the GUI (see
+ * set_gui_enabled()) does not play or step it, until the program calls start_simulation().
+ *
+ * @throws std::runtime_error If no model is loaded, or the simulation runs in real time
+ *         (start_simulation(); call stop_simulation() first)
+ */
 void DQ_MujocoInterface::trigger_next_simulation_step()
 {
     _check_model();
     impl_->step_simulation();
+    impl_->stepped_by_program_ = true;
 }
 
 double DQ_MujocoInterface::get_simulation_time() const
@@ -2295,6 +2327,7 @@ void DQ_MujocoInterface::start_simulation()
 {
     _check_model();
     impl_->_start_simulation();
+    impl_->stepped_by_program_ = false;  // the GUI can pause and play it again
 }
 
 /**
@@ -3363,7 +3396,8 @@ bool DQ_MujocoInterface::is_gui_available()
  * The simulation controls act as the corresponding methods called by the program: play and pause
  * are start_simulation() and stop_simulation(), and step is trigger_next_simulation_step(). They run
  * in the main thread, in should_close_window(). Keys: Space (play/pause), Right (step), Backspace
- * (reset).
+ * (reset). In a program that steps the simulation itself (trigger_next_simulation_step()), play
+ * and step are disabled: the program is the clock (playing would make its next step throw).
  *
  * Call it from the main thread, before or after load_model(). In HEADLESS mode it has no effect.
  *
