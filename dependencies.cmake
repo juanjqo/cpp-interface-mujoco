@@ -45,6 +45,20 @@ if(DQ_MUJOCO_BUILD_GUI)
         URL https://github.com/ocornut/imgui/archive/refs/tags/v${IMGUI_VERSION}.tar.gz
     )
     FetchContent_MakeAvailable(imgui)
+
+    # ImGuizmo, the gizmo of the GUI (move and rotate bodies, view cube), built into this library
+    # with ImGui. Its context is made per thread (cmake/PatchImGuizmo.cmake).
+    set(IMGUIZMO_COMMIT "105e4fde45e4e74aae8973d98750820ef7aca7e2")
+    FetchContent_Declare(
+        imguizmo
+        URL https://github.com/CedricGuillemet/ImGuizmo/archive/${IMGUIZMO_COMMIT}.tar.gz
+        PATCH_COMMAND ${CMAKE_COMMAND} -DFILE=<SOURCE_DIR>/src/ImGuizmo.cpp
+                      -P ${CMAKE_CURRENT_LIST_DIR}/cmake/PatchImGuizmo.cmake
+        # Only its sources are used, not its CMakeLists.txt (other widgets and an example): a
+        # SOURCE_SUBDIR without CMakeLists.txt makes FetchContent only download it
+        SOURCE_SUBDIR none
+    )
+    FetchContent_MakeAvailable(imguizmo)
 endif()
 
 set(MUJOCO_INCLUDE_DIR ${mujoco_SOURCE_DIR}/include)

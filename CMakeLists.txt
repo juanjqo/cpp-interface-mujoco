@@ -96,11 +96,12 @@ if(DQ_MUJOCO_HAS_EGL)
     target_compile_definitions(${PROJECT_NAME} PRIVATE DQ_MUJOCO_HAS_EGL)
 endif()
 
-# GUI of the viewer (set_gui_enabled()). Dear ImGui is an implementation detail, like MuJoCo's
-# tinyxml2: its sources are built into this library (a separate static target would have to be
-# exported in static builds), and its symbols are hidden, so that the programs that load this
-# library and use their own ImGui do not bind to this copy. Each viewer thread has its own ImGui
-# context (dq_mujoco_imconfig.h). Without the GUI, the public API is the same.
+# GUI of the viewer (set_gui_enabled()). Dear ImGui and ImGuizmo are implementation details, like
+# MuJoCo's tinyxml2: their sources are built into this library (a separate static target would have
+# to be exported in static builds), and their symbols are hidden, so that the programs that load
+# this library and use their own ImGui do not bind to this copy. Each viewer thread has its own
+# ImGui and ImGuizmo contexts (dq_mujoco_imconfig.h, cmake/PatchImGuizmo.cmake). Without the GUI,
+# the public API is the same.
 if(DQ_MUJOCO_BUILD_GUI)
     set(IMGUI_SOURCES
         ${imgui_SOURCE_DIR}/imgui.cpp
@@ -108,6 +109,7 @@ if(DQ_MUJOCO_BUILD_GUI)
         ${imgui_SOURCE_DIR}/imgui_tables.cpp
         ${imgui_SOURCE_DIR}/imgui_widgets.cpp
         ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+        ${imguizmo_SOURCE_DIR}/src/ImGuizmo.cpp
     )
     set(GUI_SOURCES
         src/dqrobotics_extensions/interfaces/mujoco/DQ_MujocoGui.cpp
@@ -133,6 +135,7 @@ if(DQ_MUJOCO_BUILD_GUI)
     target_include_directories(${PROJECT_NAME} PRIVATE
         $<BUILD_INTERFACE:${imgui_SOURCE_DIR}>
         $<BUILD_INTERFACE:${imgui_SOURCE_DIR}/backends>
+        $<BUILD_INTERFACE:${imguizmo_SOURCE_DIR}/src>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/dqrobotics_extensions/interfaces/mujoco>
     )
     target_compile_definitions(${PROJECT_NAME} PRIVATE
@@ -176,7 +179,8 @@ set(BUNDLED_LICENSES  # <fetched dependency> <its license file>
     qhull           COPYING.txt
     tinyobjloader   LICENSE
     tinyxml2        LICENSE.txt
-    imgui           LICENSE.txt)
+    imgui           LICENSE.txt
+    imguizmo        LICENSE)
 while(BUNDLED_LICENSES)
     list(POP_FRONT BUNDLED_LICENSES dependency license_file)
     FetchContent_GetProperties(${dependency} SOURCE_DIR source_dir)

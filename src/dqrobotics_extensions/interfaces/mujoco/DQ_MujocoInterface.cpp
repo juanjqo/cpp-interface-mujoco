@@ -223,6 +223,21 @@ public:
     // set by the viewer thread, applied before each step
     mjvPerturb pert_;
     bool perturb_force_applied_{false};
+#ifdef DQ_MUJOCO_HAS_GUI
+    // The body dragged with the gizmo (GUI), held at its pose before each step. Protected by
+    // physics_mutex_, like the fixed bodies moved with it (by name), which the main thread writes
+    // in the specification so that edit_scene() keeps them.
+    struct GizmoHold
+    {
+        bool active = false;
+        int body = -1;
+        MujocoGui::Movable movable = MujocoGui::Movable::NONE;
+        mjtNum pos[3] = {0, 0, 0};
+        mjtNum quat[4] = {1, 0, 0, 0};
+    };
+    GizmoHold gizmo_hold_;
+    std::vector<std::string> gizmo_moved_fixed_bodies_;
+#endif
 
     // Camera thread (from the first start_camera() on): renders the cameras offscreen, with its own
     // OpenGL context. Its lock order: it takes physics_mutex_ to copy the state.
@@ -500,6 +515,10 @@ public:
         snapshot_ = snapshot;
         mjv_defaultPerturb(&pert_);  // the bodies of the previous model
         perturb_force_applied_ = false;
+#ifdef DQ_MUJOCO_HAS_GUI
+        gizmo_hold_ = GizmoHold();
+        gizmo_moved_fixed_bodies_.clear();
+#endif
         spec_ = spec;
         vfs_ = std::move(vfs);
         camera_tracking_body_.clear();
@@ -684,6 +703,9 @@ public:
         mjv_defaultPerturb(&pert_);
         mju_zero(d_->xfrc_applied, 6 * m_->nbody);
         perturb_force_applied_ = false;
+#ifdef DQ_MUJOCO_HAS_GUI
+        gizmo_hold_ = GizmoHold();
+#endif
 
         // The sizes of the model changed
         {
@@ -955,6 +977,7 @@ public:
                     gui->select_body(body, local_point);
                 }
                 _perturb(gui->perturb_input());
+                _gizmo(gui->gizmo_input());
                 mjr_render(viewport, &scn_, &con_);
                 gui->render();
                 gui_drawn = true;
@@ -1046,7 +1069,10 @@ public:
         screen_height_ = height;
 #ifdef DQ_MUJOCO_HAS_GUI
         if (gui_)
+        {
             _run_gui_requests();
+            _keep_moved_fixed_bodies();
+        }
 #endif
     }
 
@@ -1085,6 +1111,129 @@ public:
         {
             mjv_applyPerturbPose(m_, d_, &pert_, 1);
             mj_forward(m_, d_);
+        }
+    }
+
+    /**
+     * @brief _gizmo moves the body dragged with the gizmo (GUI) to the pose of the gizmo, and holds
+     *        it there while it is dragged: _step() applies the pose before each step, so the
+     *        dynamics do not move the body away. Free bodies are released with zero velocity.
+     *        Viewer thread, with viewer_mutex_ held.
+     */
+    void _gizmo(const MujocoGui::GizmoInput& input)
+    {
+        if (!input.moved && !input.end)
+            return;
+        std::lock_guard<std::mutex> lock(physics_mutex_);
+        if (input.moved && input.body > 0 && input.body < m_->nbody)
+        {
+            const MujocoGui::Movable movable = MujocoGui::movable(m_, input.body);
+            if (movable != MujocoGui::Movable::NONE)
+            {
+                gizmo_hold_.active = true;
+                gizmo_hold_.body = input.body;
+                gizmo_hold_.movable = movable;
+                mju_copy3(gizmo_hold_.pos, input.pos);
+                mju_copy4(gizmo_hold_.quat, input.quat);
+                _apply_gizmo_hold();
+                if (simulation_running_)
+                    _publish_state();
+                else
+                    mj_forward(m_, d_);
+            }
+        }
+        if (input.end && gizmo_hold_.active)
+        {
+            if (gizmo_hold_.movable == MujocoGui::Movable::FIXED)
+                if (const char* name = mj_id2name(m_, mjOBJ_BODY, gizmo_hold_.body))
+                    gizmo_moved_fixed_bodies_.push_back(name);
+            gizmo_hold_.active = false;
+        }
+    }
+
+    /**
+     * @brief _apply_gizmo_hold puts the body dragged with the gizmo at its pose: in the state (free
+     *        bodies, with zero velocity, and kinematic bodies) or in the model (fixed bodies
+     *        attached to the world). The caller holds physics_mutex_.
+     */
+    void _apply_gizmo_hold()
+    {
+        const int body = gizmo_hold_.body;
+        switch (gizmo_hold_.movable)
+        {
+        case MujocoGui::Movable::FREE:
+        {
+            const int joint = m_->body_jntadr[body];
+            mjtNum* qpos = d_->qpos + m_->jnt_qposadr[joint];
+            mju_copy3(qpos, gizmo_hold_.pos);
+            mju_copy4(qpos + 3, gizmo_hold_.quat);
+            mju_zero(d_->qvel + m_->jnt_dofadr[joint], 6);
+            break;
+        }
+        case MujocoGui::Movable::KINEMATIC:
+        {
+            const int mocap = m_->body_mocapid[body];
+            mju_copy3(d_->mocap_pos + 3 * mocap, gizmo_hold_.pos);
+            mju_copy4(d_->mocap_quat + 4 * mocap, gizmo_hold_.quat);
+            break;
+        }
+        case MujocoGui::Movable::FIXED:  // its parent is the world: the pose in the world
+            mju_copy3(m_->body_pos + 3 * body, gizmo_hold_.pos);
+            mju_copy4(m_->body_quat + 4 * body, gizmo_hold_.quat);
+            break;
+        case MujocoGui::Movable::NONE:
+            break;
+        }
+    }
+
+    /**
+     * @brief _keep_moved_fixed_bodies writes the poses of the fixed bodies moved with the gizmo in
+     *        the specification, so that edit_scene() (which compiles it) keeps them. A body of a
+     *        robot placed with DQ_MujocoSceneBuilder::add_robot() is in a frame: its pose in the
+     *        specification is relative to it. Main thread only (it owns the specification).
+     */
+    void _keep_moved_fixed_bodies()
+    {
+        std::vector<std::string> names;
+        {
+            std::lock_guard<std::mutex> lock(physics_mutex_);
+            names.swap(gizmo_moved_fixed_bodies_);
+        }
+        for (const std::string& name : names)
+        {
+            mjtNum pos[3], quat[4];
+            {
+                std::lock_guard<std::mutex> lock(physics_mutex_);
+                const int body = mj_name2id(m_, mjOBJ_BODY, name.c_str());
+                if (body < 0)
+                    continue;
+                mju_copy3(pos, m_->body_pos + 3 * body);
+                mju_copy4(quat, m_->body_quat + 4 * body);
+            }
+            mjsBody* spec_body = mjs_findBody(spec_, name.c_str());
+            if (!spec_body)
+                continue;
+            if (mjsFrame* frame = mjs_getFrame(spec_body->element))
+            {
+                if (mjs_getFrame(frame->element) || frame->alt.type != mjORIENTATION_QUAT)
+                {
+                    std::cerr << "DQ_MujocoInterface: the new pose of \"" << name << "\" is not kept by "
+                              << "edit_scene() (it is in a nested or rotated frame)." << std::endl;
+                    continue;
+                }
+                // The pose relative to the frame
+                mjtNum frame_quat[4], inverse[4], offset[3], q[4];
+                mju_copy4(frame_quat, frame->quat);
+                mju_normalize4(frame_quat);
+                mju_negQuat(inverse, frame_quat);
+                mju_sub3(offset, pos, frame->pos);
+                mju_rotVecQuat(pos, offset, inverse);
+                mju_mulQuat(q, inverse, quat);
+                mju_copy4(quat, q);
+            }
+            mju_copy3(spec_body->pos, pos);
+            mju_copy4(spec_body->quat, quat);
+            spec_body->alt.type = mjORIENTATION_QUAT;
         }
     }
 #endif
@@ -1219,6 +1368,11 @@ public:
             mju_zero(d_->xfrc_applied, 6 * m_->nbody);
             perturb_force_applied_ = false;
         }
+#ifdef DQ_MUJOCO_HAS_GUI
+        // The body dragged with the gizmo stays where the gizmo is
+        if (gizmo_hold_.active)
+            _apply_gizmo_hold();
+#endif
         const auto start = std::chrono::high_resolution_clock::now();
         mj_step(m_, d_);
         const auto end = std::chrono::high_resolution_clock::now();
@@ -3186,6 +3340,15 @@ bool DQ_MujocoInterface::is_gui_available()
  *   rotates it and right moves it (Shift: in the horizontal plane). While the simulation steps, a
  *   spring force pulls the body towards the mouse, so the robot and its controller respond to it;
  *   otherwise free and kinematic bodies are moved to the mouse at once.
+ * - Gizmo, as in Omniverse: the selected body gets handles to move (W) and rotate (E) it, in the
+ *   world or body axes (toolbar in the 3D view; Q: no gizmo). It moves free bodies (objects,
+ *   floating bases), kinematic bodies, and fixed bodies attached to the world (e.g., the base of a
+ *   fixed robot, which moves the whole robot); bodies moved by their joints have none. A dragged
+ *   body is held at the gizmo, also while the simulation runs, and free bodies are released with
+ *   zero velocity. Fixed bodies keep their new pose, also in edit_scene(); reset_simulation() puts
+ *   free and kinematic bodies back.
+ * - View cube (top-right corner of the 3D view): click a face, edge or corner to look at the scene
+ *   from there, or drag it to turn the camera.
  * - Properties: the pose of the selected body (position and rotation), its mass, and a button
  *   to follow it with the camera.
  * - Joints: the position (within its limits) and velocity of each hinge and slide joint.
@@ -3264,6 +3427,9 @@ void DQ_MujocoInterface::edit_scene(const std::function<void(DQ_MujocoSceneBuild
 {
     _check_model();
     Impl& impl = *impl_;
+#ifdef DQ_MUJOCO_HAS_GUI
+    impl._keep_moved_fixed_bodies();  // the bodies moved with the gizmo stay where they are
+#endif
 
     // Edit the specification, and check the result before changing the model, since a failed
     // mj_recompile() would leave the model and the data invalid. The checks compile a copy: the

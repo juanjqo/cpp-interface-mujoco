@@ -12,6 +12,7 @@ It uses DQ Robotics (https://dqrobotics.github.io) but is not part of DQ Robotic
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "imgui_impl_opengl3.h"
+#include "ImGuizmo.h"
 #include "GLFW/glfw3.h"  // key codes and the OpenGL 1.1 functions (glClear, ...)
 #include <algorithm>
 #include <cctype>
@@ -146,12 +147,13 @@ bool has_free_joint(const mjModel* m, const int& body)
     return false;
 }
 
-enum class Icon { PLAY, PAUSE, STEP, RESET };
+enum class Icon { PLAY, PAUSE, STEP, RESET, SELECT, MOVE, ROTATE };
 
 /**
  * @brief icon_button draws a button with a vector icon (the font has no icons).
  */
-bool icon_button(const char* id, const Icon& icon, const char* tooltip, const bool& enabled = true)
+bool icon_button(const char* id, const Icon& icon, const char* tooltip, const bool& enabled = true,
+                 const bool& selected = false)
 {
     const float h = ImGui::GetFrameHeight();
     ImGui::BeginDisabled(!enabled);
@@ -162,7 +164,9 @@ bool icon_button(const char* id, const Icon& icon, const char* tooltip, const bo
     ImDrawList* draw = ImGui::GetWindowDrawList();
     const ImVec2 a = ImGui::GetItemRectMin();
     const ImVec2 b = ImGui::GetItemRectMax();
-    if (hovered && enabled)
+    if (selected)
+        draw->AddRectFilled(a, b, ImGui::GetColorU32(ImGuiCol_Header), ImGui::GetStyle().FrameRounding);
+    else if (hovered && enabled)
         draw->AddRectFilled(a, b, ImGui::GetColorU32(ImGui::IsItemActive() ? ImGuiCol_ButtonActive
                                                                            : ImGuiCol_ButtonHovered),
                             ImGui::GetStyle().FrameRounding);
@@ -191,6 +195,37 @@ bool icon_button(const char* id, const Icon& icon, const char* tooltip, const bo
         const ImVec2 tip = c + ImVec2(std::cos(IM_PI * 0.15f), std::sin(IM_PI * 0.15f)) * (0.85f * r);
         draw->AddTriangleFilled(tip + ImVec2(-0.6f * r, -0.05f * r), tip + ImVec2(0.45f * r, -0.35f * r),
                                 tip + ImVec2(0.25f * r, 0.6f * r), col);
+        break;
+    }
+    case Icon::SELECT:  // a mouse pointer
+    {
+        const ImVec2 points[7] = {c + ImVec2(-0.65f * r, -1.05f * r), c + ImVec2(-0.65f * r, 0.75f * r),
+                                  c + ImVec2(-0.2f * r, 0.3f * r),   c + ImVec2(0.15f * r, 1.05f * r),
+                                  c + ImVec2(0.45f * r, 0.9f * r),   c + ImVec2(0.1f * r, 0.15f * r),
+                                  c + ImVec2(0.75f * r, 0.15f * r)};
+        draw->AddConcavePolyFilled(points, 7, col);
+        break;
+    }
+    case Icon::MOVE:  // four arrows
+    {
+        const float t = std::max(1.5f, 0.22f * r);
+        draw->AddLine(c + ImVec2(-0.75f * r, 0), c + ImVec2(0.75f * r, 0), col, t);
+        draw->AddLine(c + ImVec2(0, -0.75f * r), c + ImVec2(0, 0.75f * r), col, t);
+        const float l = 1.1f * r, w = 0.38f * r, s = 0.62f * r;
+        draw->AddTriangleFilled(c + ImVec2(l, 0), c + ImVec2(s, -w), c + ImVec2(s, w), col);
+        draw->AddTriangleFilled(c + ImVec2(-l, 0), c + ImVec2(-s, w), c + ImVec2(-s, -w), col);
+        draw->AddTriangleFilled(c + ImVec2(0, -l), c + ImVec2(w, -s), c + ImVec2(-w, -s), col);
+        draw->AddTriangleFilled(c + ImVec2(0, l), c + ImVec2(-w, s), c + ImVec2(w, s), col);
+        break;
+    }
+    case Icon::ROTATE:  // an orbit with an arrow
+    {
+        const float t = std::max(1.5f, 0.22f * r);
+        draw->AddEllipse(c, ImVec2(1.0f * r, 0.5f * r), col, 0.0f, 24, t);
+        draw->AddCircleFilled(c, 0.22f * r, col);
+        const ImVec2 tip = c + ImVec2(0.15f * r, 0.5f * r);
+        draw->AddTriangleFilled(tip + ImVec2(0.35f * r, 0), tip + ImVec2(-0.15f * r, -0.32f * r),
+                                tip + ImVec2(-0.15f * r, 0.32f * r), col);
         break;
     }
     }
@@ -236,6 +271,107 @@ void vector_row(const char* label, const mjtNum* values, const int& n, const cha
     }
 }
 
+//--------------------------------------------------------------------------------------------------
+// Matrices for ImGuizmo: 4x4, column-major (OpenGL)
+//--------------------------------------------------------------------------------------------------
+
+/**
+ * @brief camera_matrices computes the view and projection matrices of the camera of the 3D view,
+ *        as mjr_render() sets them.
+ */
+void camera_matrices(const mjvGLCamera& camera, const float& aspect_ratio, float view[16], float projection[16])
+{
+    const float* f = camera.forward;
+    const float* u = camera.up;
+    const float* p = camera.pos;
+    const float r[3] = {f[1] * u[2] - f[2] * u[1], f[2] * u[0] - f[0] * u[2], f[0] * u[1] - f[1] * u[0]};
+    auto dot = [](const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+    const float v[16] = {r[0], u[0], -f[0], 0,
+                         r[1], u[1], -f[1], 0,
+                         r[2], u[2], -f[2], 0,
+                         -dot(r, p), -dot(u, p), dot(f, p), 1};
+    std::copy(v, v + 16, view);
+
+    // mjr_render() matches the width of the frustum to the aspect ratio of the viewport
+    const float half_width = camera.frustum_width ? camera.frustum_width
+                                                  : 0.5f * aspect_ratio * (camera.frustum_top - camera.frustum_bottom);
+    const float l = camera.frustum_center - half_width, rt = camera.frustum_center + half_width;
+    const float b = camera.frustum_bottom, t = camera.frustum_top;
+    const float n = camera.frustum_near, fr = camera.frustum_far;
+    std::fill(projection, projection + 16, 0.0f);
+    if (camera.orthographic)
+    {
+        projection[0] = 2 / (rt - l);
+        projection[5] = 2 / (t - b);
+        projection[10] = -2 / (fr - n);
+        projection[12] = -(rt + l) / (rt - l);
+        projection[13] = -(t + b) / (t - b);
+        projection[14] = -(fr + n) / (fr - n);
+        projection[15] = 1;
+    }
+    else
+    {
+        projection[0] = 2 * n / (rt - l);
+        projection[5] = 2 * n / (t - b);
+        projection[8] = (rt + l) / (rt - l);
+        projection[9] = (t + b) / (t - b);
+        projection[10] = -(fr + n) / (fr - n);
+        projection[11] = -1;
+        projection[14] = -2 * fr * n / (fr - n);
+    }
+}
+
+void pose_to_matrix(const mjtNum pos[3], const mjtNum quat[4], float matrix[16])
+{
+    mjtNum rotation[9];  // row-major
+    mju_quat2Mat(rotation, quat);
+    for (int row = 0; row < 3; row++)
+    {
+        for (int col = 0; col < 3; col++)
+            matrix[4 * col + row] = static_cast<float>(rotation[3 * row + col]);
+        matrix[12 + row] = static_cast<float>(pos[row]);
+        matrix[4 * row + 3] = 0;
+    }
+    matrix[15] = 1;
+}
+
+void matrix_to_pose(const float matrix[16], mjtNum pos[3], mjtNum quat[4])
+{
+    mjtNum rotation[9];
+    for (int row = 0; row < 3; row++)
+    {
+        for (int col = 0; col < 3; col++)
+            rotation[3 * row + col] = matrix[4 * col + row];
+        pos[row] = matrix[12 + row];
+    }
+    mju_mat2Quat(quat, rotation);
+    mju_normalize4(quat);
+}
+
+// c = a*b
+void multiply(const float a[16], const float b[16], float c[16])
+{
+    for (int col = 0; col < 4; col++)
+        for (int row = 0; row < 4; row++)
+        {
+            float sum = 0;
+            for (int k = 0; k < 4; k++)
+                sum += a[4 * k + row] * b[4 * col + k];
+            c[4 * col + row] = sum;
+        }
+}
+
+// MuJoCo's z axis is up, and the view cube of ImGuizmo turns about y: it gets the view of the same
+// world with y up (x' = x, y' = z, z' = -y)
+const float Z_UP_TO_Y_UP[16] = {1, 0, 0, 0,    // column 0: x -> x'
+                                0, 0, -1, 0,   // column 1: y -> -z'
+                                0, 1, 0, 0,    // column 2: z -> y'
+                                0, 0, 0, 1};
+const float Y_UP_TO_Z_UP[16] = {1, 0, 0, 0,
+                                0, 0, 1, 0,
+                                0, -1, 0, 0,
+                                0, 0, 0, 1};
+
 /**
  * @brief status_dot draws a filled circle aligned with the current line of text.
  */
@@ -253,6 +389,19 @@ void status_dot(const ImU32& col)
 //--------------------------------------------------------------------------------------------------
 // State
 //--------------------------------------------------------------------------------------------------
+
+MujocoGui::Movable MujocoGui::movable(const mjModel* m, const int& body)
+{
+    if (body <= 0 || body >= m->nbody)
+        return Movable::NONE;
+    if (m->body_mocapid[body] >= 0)
+        return Movable::KINEMATIC;
+    if (m->body_jntnum[body] == 1 && m->jnt_type[m->body_jntadr[body]] == mjJNT_FREE)
+        return Movable::FREE;
+    if (m->body_parentid[body] == 0 && m->body_jntnum[body] == 0)
+        return Movable::FIXED;
+    return Movable::NONE;
+}
 
 void MujocoGui::State::copy(const mjModel* m, const mjData* d)
 {
@@ -559,6 +708,7 @@ mjrRect MujocoGui::begin_frame(const Frame& frame)
     ImGui_ImplOpenGL3_NewFrame();
     backend_lock.unlock();
     ImGui::NewFrame();
+    ImGuizmo::BeginFrame();
 
     // The bars first: the dock space fills the rest of the window
     _shortcuts(frame);
@@ -587,10 +737,16 @@ mjrRect MujocoGui::begin_frame(const Frame& frame)
         if (central->Size.x > 0 && central->Size.y > 0)
             view_rect = ImRect(central->Pos, central->Pos + central->Size);
 
+    // The gizmo, the view cube and the toolbar, over the 3D view
+    const float overlay_rect[4] = {view_rect.Min.x, view_rect.Min.y, view_rect.Max.x, view_rect.Max.y};
+    _viewport_overlay(frame, overlay_rect);
+    _viewport_toolbar(overlay_rect);
+    wants_mouse_ = io.WantCaptureMouse || gizmo_hovered_;
+
     // A click in the 3D view selects the body under the cursor. Only a click: a drag moves the
-    // camera, and a press on a panel is for the panel.
+    // camera, and a press on a panel (or the gizmo) is for the panel.
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-        click_in_view_ = !io.WantCaptureMouse && !io.KeyCtrl && view_rect.Contains(io.MousePos);
+        click_in_view_ = !io.WantCaptureMouse && !gizmo_hovered_ && !io.KeyCtrl && view_rect.Contains(io.MousePos);
     if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
     {
         if (click_in_view_ && io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left]
@@ -609,7 +765,8 @@ mjrRect MujocoGui::begin_frame(const Frame& frame)
     perturb_ = PerturbInput();
     if (perturb_button_ < 0)
     {
-        if (selected_body_ > 0 && io.KeyCtrl && !io.WantCaptureMouse && view_rect.Contains(io.MousePos))
+        if (selected_body_ > 0 && io.KeyCtrl && !io.WantCaptureMouse && !gizmo_hovered_
+            && view_rect.Contains(io.MousePos))
         {
             for (const ImGuiMouseButton button : {ImGuiMouseButton_Left, ImGuiMouseButton_Right})
             {
@@ -709,6 +866,148 @@ void MujocoGui::highlight_selection(const mjModel* m, mjvScene& scn) const
     }
 }
 
+void MujocoGui::_viewport_overlay(const Frame& frame, const float view_rect[4])
+{
+    gizmo_ = GizmoInput();
+    gizmo_hovered_ = false;
+    const mjModel* m = frame.m;
+    const ImVec2 origin(view_rect[0], view_rect[1]);
+    const ImVec2 size(view_rect[2] - view_rect[0], view_rect[3] - view_rect[1]);
+    if (size.x <= 0 || size.y <= 0)
+        return;
+
+    // The camera of the 3D view
+    const mjvGLCamera camera = mjv_averageCamera(frame.scn.camera, frame.scn.camera + 1);
+    float view[16], projection[16];
+    camera_matrices(camera, size.x / size.y, view, projection);
+
+    // ImGuizmo draws in a transparent window over the 3D view (below the panels)
+    ImGui::SetNextWindowPos(origin);
+    ImGui::SetNextWindowSize(size);
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs
+                                   | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings
+                                   | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus
+                                   | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoNav;
+    ImGui::Begin("##viewport_overlay", nullptr, flags);
+    ImGuizmo::SetDrawlist();
+    ImGuizmo::SetRect(origin.x, origin.y, size.x, size.y);
+    ImGuizmo::SetOrthographic(camera.orthographic != 0);
+    ImGuizmo::AllowAxisFlip(false);
+    ImGuizmo::SetGizmoSizeClipSpace(0.16f);
+    ImGuizmo::Style& style = ImGuizmo::GetStyle();
+    style.TranslationLineThickness = 3.0f * content_scale_;
+    style.TranslationLineArrowSize = 7.0f * content_scale_;
+    style.RotationLineThickness = 3.0f * content_scale_;
+    style.RotationOuterLineThickness = 2.5f * content_scale_;
+    const ImVec4 x_color = ImGui::ColorConvertU32ToFloat4(AXIS_COLORS[0]);
+    const ImVec4 y_color = ImGui::ColorConvertU32ToFloat4(AXIS_COLORS[1]);
+    const ImVec4 z_color = ImGui::ColorConvertU32ToFloat4(AXIS_COLORS[2]);
+    style.Colors[ImGuizmo::DIRECTION_X] = style.Colors[ImGuizmo::PLANE_X] = x_color;
+    style.Colors[ImGuizmo::DIRECTION_Y] = style.Colors[ImGuizmo::PLANE_Y] = y_color;
+    style.Colors[ImGuizmo::DIRECTION_Z] = style.Colors[ImGuizmo::PLANE_Z] = z_color;
+    style.Colors[ImGuizmo::SELECTION] = color(SELECTION);
+
+    // The gizmo of the selected body, if the gizmo can move it (not while it is dragged with Ctrl)
+    const int b = selected_body_;
+    const bool has_pose = b > 0 && 3 * b + 2 < static_cast<int>(frame.state.xpos.size());
+    const bool show_gizmo = tool_ != Tool::SELECT && has_pose && perturb_button_ < 0
+                            && movable(m, b) != Movable::NONE;
+    bool dragging = false;
+    if (show_gizmo)
+    {
+        float matrix[16];
+        pose_to_matrix(frame.state.xpos.data() + 3 * b, frame.state.xquat.data() + 4 * b, matrix);
+        ImGuizmo::PushID(b);
+        if (ImGuizmo::Manipulate(view, projection, tool_ == Tool::MOVE ? ImGuizmo::TRANSLATE : ImGuizmo::ROTATE,
+                                 gizmo_local_ ? ImGuizmo::LOCAL : ImGuizmo::WORLD, matrix))
+        {
+            gizmo_.moved = true;
+            gizmo_.body = b;
+            matrix_to_pose(matrix, gizmo_.pos, gizmo_.quat);
+        }
+        dragging = ImGuizmo::IsUsing();
+        gizmo_hovered_ = ImGuizmo::IsOver() || dragging;
+        ImGuizmo::PopID();
+    }
+    if (dragging)
+        gizmo_body_ = b;
+    else if (gizmo_dragging_)
+    {
+        gizmo_.end = true;
+        gizmo_.body = gizmo_body_;
+    }
+    gizmo_dragging_ = dragging;
+    ImGui::End();
+
+    // The view cube, in the top-right corner (not for the cameras of the model, which are fixed). It
+    // has a window of its own: ImGuizmo takes the mouse for it wherever its window is hovered.
+    if (show_view_cube_ && frame.cam.type != mjCAMERA_FIXED)
+    {
+        const float cube = 100.0f * content_scale_;
+        const ImVec2 position(origin.x + size.x - cube - 6 * content_scale_, origin.y + 6 * content_scale_);
+        ImGui::SetNextWindowPos(position);
+        ImGui::SetNextWindowSize(ImVec2(cube, cube));
+        ImGui::Begin("##view_cube", nullptr, flags);
+        ImGuizmo::SetDrawlist();
+        float y_up_view[16], identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        multiply(view, Y_UP_TO_Z_UP, y_up_view);
+        float before[16];
+        std::copy(y_up_view, y_up_view + 16, before);
+        // Its faces in the colors of MuJoCo's axes (y' is z, and z' is -y). ImGuizmo lightens them
+        // by setting the high bit of each channel, so the channels are 0 or high.
+        style.Colors[ImGuizmo::DIRECTION_X] = color(0xE00000);
+        style.Colors[ImGuizmo::DIRECTION_Y] = color(0x0000E0);
+        style.Colors[ImGuizmo::DIRECTION_Z] = color(0x00B000);
+        ImGuizmo::ViewManipulate(y_up_view, projection, ImGuizmo::TRANSLATE, ImGuizmo::WORLD, identity,
+                                 static_cast<float>(frame.cam.distance), position, ImVec2(cube, cube), 0x00000000);
+        gizmo_hovered_ = gizmo_hovered_ || ImGuizmo::IsViewManipulateHovered() || ImGuizmo::IsUsingViewManipulate();
+        if (!std::equal(before, before + 16, y_up_view))
+        {
+            // The new direction of the camera, as MuJoCo's azimuth and elevation (around the same
+            // point: the distance is the one of the camera)
+            float new_view[16];
+            multiply(y_up_view, Z_UP_TO_Y_UP, new_view);
+            const double fx = -new_view[2], fy = -new_view[6], fz = -new_view[10];
+            const double norm = std::sqrt(fx * fx + fy * fy + fz * fz);
+            if (norm > 1e-6)
+            {
+                frame.cam.azimuth = std::atan2(fy, fx) * 180.0 / mjPI;
+                frame.cam.elevation = std::clamp(std::asin(fz / norm) * 180.0 / mjPI, -89.5, 89.5);
+            }
+        }
+        ImGui::End();
+    }
+}
+
+void MujocoGui::_viewport_toolbar(const float view_rect[4])
+{
+    // The tools of the gizmo, in the top-left corner of the 3D view
+    const float margin = 6.0f * content_scale_;
+    ImGui::SetNextWindowPos(ImVec2(view_rect[0] + margin, view_rect[1] + margin));
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize
+                                   | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing
+                                   | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f * content_scale_);
+    if (ImGui::Begin("##viewport_toolbar", nullptr, flags))
+    {
+        if (icon_button("##select", Icon::SELECT, "Select (Q)", true, tool_ == Tool::SELECT))
+            tool_ = Tool::SELECT;
+        if (icon_button("##move", Icon::MOVE, "Move (W)", true, tool_ == Tool::MOVE))
+            tool_ = Tool::MOVE;
+        if (icon_button("##rotate", Icon::ROTATE, "Rotate (E)", true, tool_ == Tool::ROTATE))
+            tool_ = Tool::ROTATE;
+        ImGui::Separator();
+        if (ImGui::Button(gizmo_local_ ? "Local" : "World"))
+            gizmo_local_ = !gizmo_local_;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The gizmo follows the axes of the %s", gizmo_local_ ? "body" : "world");
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+}
+
 void MujocoGui::_dock_layout(const unsigned int& dockspace_id)
 {
     // Scene and visualization on the left, properties, joints and sensors on the right, and the
@@ -749,6 +1048,16 @@ void MujocoGui::_shortcuts(const Frame& frame)
         _request({false, false, true, -1});
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
         selected_body_ = -1;
+    // Tools of the gizmo, as in Omniverse
+    if (!ImGui::GetIO().KeyCtrl)
+    {
+        if (ImGui::IsKeyPressed(ImGuiKey_Q, false))
+            tool_ = Tool::SELECT;
+        if (ImGui::IsKeyPressed(ImGuiKey_W, false))
+            tool_ = Tool::MOVE;
+        if (ImGui::IsKeyPressed(ImGuiKey_E, false))
+            tool_ = Tool::ROTATE;
+    }
 }
 
 
@@ -789,6 +1098,8 @@ void MujocoGui::_menu_bar(const Frame& frame)
         ImGui::MenuItem("Joints", nullptr, &show_joints_);
         ImGui::MenuItem("Sensors", nullptr, &show_sensors_);
         ImGui::MenuItem("Visualization", nullptr, &show_visualization_);
+        ImGui::Separator();
+        ImGui::MenuItem("View cube", nullptr, &show_view_cube_);
         ImGui::Separator();
         if (ImGui::MenuItem("Reset layout"))
         {
@@ -1065,6 +1376,13 @@ void MujocoGui::_properties_panel(const Frame& frame)
                     }
                 }
                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                switch (movable(m, b))
+                {
+                case Movable::FREE:      ImGui::TextWrapped("Gizmo (W, E): places the body."); break;
+                case Movable::KINEMATIC: ImGui::TextWrapped("Gizmo (W, E): moves the kinematic body."); break;
+                case Movable::FIXED:     ImGui::TextWrapped("Gizmo (W, E): moves the body and its children."); break;
+                case Movable::NONE:      ImGui::TextWrapped("Moved by its joints: no gizmo."); break;
+                }
                 ImGui::TextWrapped("Ctrl + drag in the 3D view: left rotates the body, right moves it "
                                    "(Shift: horizontally).");
                 ImGui::PopStyleColor();

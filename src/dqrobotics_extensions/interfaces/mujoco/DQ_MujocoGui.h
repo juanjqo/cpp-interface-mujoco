@@ -112,6 +112,27 @@ public:
     };
 
     /**
+     * @brief The bodies that the gizmo moves: FREE bodies (a free joint: objects, floating bases),
+     *        KINEMATIC bodies (mocap), and FIXED bodies attached to the world (e.g., the base of a
+     *        fixed robot, which moves the whole robot). Bodies moved by their joints have no gizmo.
+     */
+    enum class Movable { NONE, FREE, KINEMATIC, FIXED };
+    static Movable movable(const mjModel* m, const int& body);
+
+    /**
+     * @brief The pose given to a body with the gizmo in the last frame. While the gizmo is dragged,
+     *        the body is held at that pose.
+     */
+    struct GizmoInput
+    {
+        bool moved = false;  // the gizmo moved body to pos, quat (in the world frame)
+        bool end = false;    // the drag of the gizmo ended
+        int body = -1;
+        mjtNum pos[3] = {0, 0, 0};
+        mjtNum quat[4] = {1, 0, 0, 0};
+    };
+
+    /**
      * @param content_scale Scale of the contents of the window (e.g., 2 on a high-DPI display).
      */
     explicit MujocoGui(const float& content_scale);
@@ -148,6 +169,7 @@ public:
     void select_body(const int& body, const mjtNum local_point[3]);
     bool take_pick(Pick& pick);         // the last click in the 3D view, if any
     const PerturbInput& perturb_input() const { return perturb_; }
+    const GizmoInput& gizmo_input() const { return gizmo_; }
     // Makes the geoms of the selected body and of its children glow, in the selection color (amber) (call it
     // after mjv_updateScene(), which makes the geoms of the frame)
     void highlight_selection(const mjModel* m, mjvScene& scn) const;
@@ -184,6 +206,16 @@ private:
     int picked_body_ = -1;
     PerturbInput perturb_;
     int perturb_button_ = -1;  // the button that drags the body (-1: none)
+
+    // Gizmo and view cube (ImGuizmo), in the 3D view
+    enum class Tool { SELECT, MOVE, ROTATE };
+    Tool tool_ = Tool::MOVE;
+    bool gizmo_local_ = false;     // the axes of the body, instead of the world's
+    bool show_view_cube_ = true;
+    bool gizmo_dragging_ = false;
+    int gizmo_body_ = -1;          // the body being dragged
+    bool gizmo_hovered_ = false;   // the gizmo, the view cube or the toolbar take the mouse
+    GizmoInput gizmo_;
     bool show_scene_ = true;
     bool show_properties_ = true;
     bool show_joints_ = true;
@@ -206,6 +238,8 @@ private:
     void _sensors_panel(const Frame& frame);
     void _visualization_panel(const Frame& frame);
     void _shortcuts(const Frame& frame);
+    void _viewport_overlay(const Frame& frame, const float view_rect[4]);
+    void _viewport_toolbar(const float view_rect[4]);
 };
 
 }
