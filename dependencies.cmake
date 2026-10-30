@@ -127,7 +127,8 @@ if(NOT marinholab_sas_core_FOUND)
     FetchContent_Declare(
         sas_cpp
         GIT_REPOSITORY https://github.com/MarinhoLab/sas_cpp.git
-        GIT_TAG 78cf20cc1753bd5bd63d32f02c76f9b82192e404
+        # The same sources as the previous pin (78cf20c), which a rewrite of sas_cpp's history removed
+        GIT_TAG 3160476f66b47fe53daab09cb4d619f021cd395b
     )
     FetchContent_MakeAvailable(sas_cpp)
 endif()
