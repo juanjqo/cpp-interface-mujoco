@@ -5,8 +5,9 @@ Source: https://github.com/juanjqo/cpp-interface-mujoco
 Comment: The binary package also contains MuJoCo
  (https://github.com/google-deepmind/mujoco, Apache-2.0) and the libraries
  MuJoCo builds in, downloaded at build time. The library also has built in
- Dear ImGui (https://github.com/ocornut/imgui, MIT) and ImGuizmo
- (https://github.com/CedricGuillemet/ImGuizmo, MIT), downloaded at build
+ Dear ImGui (https://github.com/ocornut/imgui, MIT), ImGuizmo
+ (https://github.com/CedricGuillemet/ImGuizmo, MIT) and ImOGuizmo
+ (https://github.com/fknfilewalker/imoguizmo, MIT), downloaded at build
  time, and the Roboto font from ImGui's sources (Apache-2.0). Their licenses are
  installed in /usr/share/doc/dqrobotics-interface-mujoco/third_party/.
 

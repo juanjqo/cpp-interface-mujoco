@@ -46,19 +46,30 @@ if(DQ_MUJOCO_BUILD_GUI)
     )
     FetchContent_MakeAvailable(imgui)
 
-    # ImGuizmo, the gizmo of the GUI (move and rotate bodies, view cube), built into this library
-    # with ImGui. Its context is made per thread (cmake/PatchImGuizmo.cmake).
+    # ImGuizmo, the gizmo of the GUI (handles to move and rotate bodies), built into this library
+    # with ImGui. Its context is made per thread (cmake/PatchThreadLocal.cmake).
     set(IMGUIZMO_COMMIT "105e4fde45e4e74aae8973d98750820ef7aca7e2")
     FetchContent_Declare(
         imguizmo
         URL https://github.com/CedricGuillemet/ImGuizmo/archive/${IMGUIZMO_COMMIT}.tar.gz
-        PATCH_COMMAND ${CMAKE_COMMAND} -DFILE=<SOURCE_DIR>/src/ImGuizmo.cpp
-                      -P ${CMAKE_CURRENT_LIST_DIR}/cmake/PatchImGuizmo.cmake
+        PATCH_COMMAND ${CMAKE_COMMAND} -DLIBRARY=ImGuizmo -DFILE=<SOURCE_DIR>/src/ImGuizmo.cpp
+                      -P ${CMAKE_CURRENT_LIST_DIR}/cmake/PatchThreadLocal.cmake
         # Only its sources are used, not its CMakeLists.txt (other widgets and an example): a
         # SOURCE_SUBDIR without CMakeLists.txt makes FetchContent only download it
         SOURCE_SUBDIR none
     )
     FetchContent_MakeAvailable(imguizmo)
+
+    # ImOGuizmo (header only), the navigation gizmo of the GUI: the axes of the world in a corner
+    # of the 3D view, as in Blender, to turn the camera. Its state is made per thread too.
+    set(IMOGUIZMO_COMMIT "a6028d0c1c8a6f067f3ff1c5d177f8f601dcc509")
+    FetchContent_Declare(
+        imoguizmo
+        URL https://github.com/fknfilewalker/imoguizmo/archive/${IMOGUIZMO_COMMIT}.tar.gz
+        PATCH_COMMAND ${CMAKE_COMMAND} -DLIBRARY=ImOGuizmo -DFILE=<SOURCE_DIR>/imoguizmo.hpp
+                      -P ${CMAKE_CURRENT_LIST_DIR}/cmake/PatchThreadLocal.cmake
+    )
+    FetchContent_MakeAvailable(imoguizmo)
 endif()
 
 set(MUJOCO_INCLUDE_DIR ${mujoco_SOURCE_DIR}/include)

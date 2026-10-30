@@ -50,6 +50,7 @@ jobs:
           test -f "${{ runner.temp }}/install/share/doc/dqrobotics-interface-mujoco/third_party/mujoco/LICENSE"
           test -f "${{ runner.temp }}/install/share/doc/dqrobotics-interface-mujoco/third_party/imgui/LICENSE.txt"
           test -f "${{ runner.temp }}/install/share/doc/dqrobotics-interface-mujoco/third_party/imguizmo/LICENSE"
+          test -f "${{ runner.temp }}/install/share/doc/dqrobotics-interface-mujoco/third_party/imoguizmo/LICENSE"
           test -f "${{ runner.temp }}/install/share/doc/dqrobotics-interface-mujoco/third_party/roboto/NOTICE"
           # Dear ImGui is built into the library: no headers installed, no symbols exported
           test ! -e "${{ runner.temp }}/install/include/imgui.h"
