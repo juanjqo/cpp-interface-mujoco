@@ -54,6 +54,7 @@ int main()
     const DQ_MujocoRobotDescription robot = GenericManipulatorRobot::description();
 
     DQ_MujocoInterface mi;
+    mi.set_gui_enabled(DQ_MujocoInterface::is_gui_available());  // the GUI, if the library has it
     mi.load_model(robot.model);
 
     const std::vector<std::string>& jointnames = robot.joint_names;

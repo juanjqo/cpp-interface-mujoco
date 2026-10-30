@@ -72,6 +72,7 @@ int main()
     scene.add_force_torque_sensor("wrist", DQ(1), "arm_link6");
 
     DQ_MujocoInterface mi;
+    mi.set_gui_enabled(DQ_MujocoInterface::is_gui_available());  // the GUI, if the library has it
     mi.load_model(scene.build());
     mi.reset_simulation("home");
     mi.set_site_frame_view(false);
