@@ -22,6 +22,9 @@ An unofficial [DQ Robotics](https://dqrobotics.github.io) interface for C++17 to
   images with the layout of a ROS `sensor_msgs/Image`; add them to scenes in code, on robots or in the world
 - Reference frames: draw named frames at runtime from dual quaternion poses, without editing the XML model
 - Visualization toggles: wireframe, joint axes, contact forces, center of mass, site frames
+- GUI (optional): docked panels around the 3D view, in the style of the editors of 3D tools: the tree of bodies,
+  the pose of the selected body (also as a unit dual quaternion), joints within their limits, sensors,
+  visualization options, and play/pause/step/reset controls. Built with [Dear ImGui](https://github.com/ocornut/imgui)
 - Simulation reset, to the initial configuration or to a keyframe of the model
 - Headless mode (no window) for automated tests, CI and batch experiments
 - Generic robots library: generic robot models embedded in the library, loaded by including a header (no model files
@@ -48,6 +51,7 @@ An unofficial [DQ Robotics](https://dqrobotics.github.io) interface for C++17 to
 | [DQ Robotics C++](https://github.com/dqrobotics/cpp) | Install manually (see below) |
 | Eigen3, GLFW, OpenGL | System packages |
 | EGL (optional, Linux) | System package. It renders the cameras in HEADLESS mode (no display needed); without it, cameras need WINDOW mode |
+| [Dear ImGui](https://github.com/ocornut/imgui) 1.93.0 (docking branch) | For the GUI (`DQ_MUJOCO_BUILD_GUI`, ON by default). Downloaded automatically by CMake and built into the library, with its symbols hidden: it is not installed, and projects that use this library need nothing else (they can use their own ImGui) |
 
 Ubuntu:
 
@@ -83,6 +87,7 @@ cd ~/git/cpp-interface-mujoco
 #    Omit -DCMAKE_INSTALL_PREFIX to use the system default (/usr/local on Linux).
 #    To build only the library, add -DDQ_MUJOCO_BUILD_EXAMPLES=OFF -DDQ_MUJOCO_BUILD_TESTS=OFF
 #    To skip the robots library (embedded robot models), add -DDQ_MUJOCO_BUILD_ROBOTS=OFF
+#    To build without the GUI of the viewer (Dear ImGui), add -DDQ_MUJOCO_BUILD_GUI=OFF
 cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/usr/local
@@ -104,6 +109,7 @@ sudo ldconfig
 # 1. Configure: choose Release, and install to your own prefix instead of a system path.
 #    To build only the library, add -DDQ_MUJOCO_BUILD_EXAMPLES=OFF -DDQ_MUJOCO_BUILD_TESTS=OFF
 #    To skip the robots library (embedded robot models), add -DDQ_MUJOCO_BUILD_ROBOTS=OFF
+#    To build without the GUI of the viewer (Dear ImGui), add -DDQ_MUJOCO_BUILD_GUI=OFF
 cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=$HOME/opt
@@ -167,10 +173,11 @@ cd ~/git/cpp-interface-mujoco/build/examples
 | [`sensors`](examples/sensors.cpp) | Reads sensors in real time: the IMU of a quadruped, touch sensors on its feet and a rangefinder under its trunk while it bobs up and down, and a force/torque sensor on the wrist of an arm |
 | [`cameras`](examples/cameras.cpp) | Renders two cameras while the simulation runs: one on the trunk of a quadruped (RGB and depth, 30 Hz) and one fixed in the world (FAST quality, 10 Hz); writes their latest images to PPM files once per second. Also in HEADLESS mode (`./cameras headless`) |
 | [`scene_builder`](examples/scene_builder.cpp) | Builds a scene in code (a table, two quadrupeds, an arm and a kinematic block moved with `set_body_pose`) and edits it while it runs in real time: a ball is dropped every 2 s and the oldest is removed; the arm's kinematics, moved to where it was placed, are drawn on its end effector |
+| [`gui`](examples/gui.cpp) | The GUI of the viewer with a scene built in code (an arm, a quadruped, a rangefinder, a camera and free objects): select bodies to see their poses, watch the joints and sensors, change the visualization options, and pause, step and reset the simulation from the menu bar |
 | [`twist_open_loop`](examples/twist_open_loop.cpp) | Stepped simulation paced by a sas `Clock`: commands a floating box with constant twists (no feedback) in `WORLD_FRAME` and `BODY_FRAME`, before every step: rise, orbit the world z axis, spin in place, drive in a circle, descend |
 
 The first three examples use `GenericManipulatorRobot`, a generic 6-DoF arm, `floating_base` uses
-`GenericQuadrupedRobot`, and `scene_builder` uses both, all from the
+`GenericQuadrupedRobot`, and `scene_builder` and `gui` use both, all from the
 [robots library](#robots-library), so they need no model files.
 `twist_open_loop` uses [`examples/models/floating_box.xml`](examples/models/floating_box.xml), a box with gravity
 compensation, which is copied next to the executables at build time.
@@ -268,6 +275,30 @@ DQ_MujocoInterface headless(DQ_MujocoInterface::RENDERING::HEADLESS);  // no win
 
 In headless mode, no window is opened and `should_close_window()` always returns `false`, so the same simulation loop
 works in both modes. Real-time and stepped simulation work in both.
+
+### GUI
+
+```cpp
+DQ_MujocoInterface mi;
+mi.set_gui_enabled(true);  // before or after load_model()
+mi.load_model(scene.build());
+```
+
+The GUI surrounds the 3D view with docked panels: **Scene** (the tree of bodies, with a search box), **Properties**
+(the pose of the selected body: position, rotation and unit dual quaternion; its mass; follow it with the camera),
+**Joints** (positions within their limits, and velocities), **Sensors**, and **Visualization** (shadows, reflections,
+wireframe, joint axes, contact forces, frames, labels, groups, ...). The panels can be moved, docked elsewhere and
+closed (View menu). The menu bar has the simulation controls and the camera (free, following a body, or a camera of
+the model), and the status bar shows the simulation time, the real-time factor and the frame rate.
+
+Play/pause, step and reset (also with Space, Right and Backspace) act as `start_simulation()`/`stop_simulation()`,
+`trigger_next_simulation_step()` and `reset_simulation()`: they run in the main thread, in `should_close_window()`.
+So if the program steps the simulation with `trigger_next_simulation_step()`, playing it from the GUI makes those
+calls throw until it is paused again.
+
+The GUI is off by default, and has no effect in headless mode. `DQ_MujocoInterface::is_gui_available()` is `false`
+if the library was built with `-DDQ_MUJOCO_BUILD_GUI=OFF`; `set_gui_enabled(true)` then throws. The API is the same
+in both builds.
 
 ### Joint commands and actuators
 
@@ -677,6 +708,7 @@ but not drawn.
 | `add_reference_frame(name, length, width, opacity, label)` / `remove_reference_frame(name)` | Create or remove a frame that is only drawn (no XML needed) |
 | `set_reference_frame_pose(name, x)` / `get_reference_frame_pose(name)` | Pose of a reference frame as a unit dual quaternion |
 | `set_wireframe_view`, `set_joint_view`, `set_contact_view`, `set_center_of_mass_view`, `set_site_frame_view` | Visualization toggles |
+| `set_gui_enabled(flag)` / `is_gui_enabled()` / `is_gui_available()` | Show the [GUI](#gui) of the viewer (off by default) / whether it is shown / (static) whether the library has it |
 
 `DQ_MujocoSceneBuilder`:
 

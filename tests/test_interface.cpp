@@ -18,7 +18,7 @@ or a single one (this is how CTest calls them) with
 The tests must run from the directory that contains the test models (CTest does this).
 Most tests run in HEADLESS mode. The ones that check the window (load_model_twice,
 two_interfaces_at_once, reference_frames_more_than_scene_capacity, camera_tracking,
-viewer_draws_in_both_modes, edit_scene_with_window) need a display; on a headless machine, use
+viewer_draws_in_both_modes, edit_scene_with_window, gui_in_window_mode) need a display; on a headless machine, use
 xvfb-run.
 */
 
@@ -1883,6 +1883,88 @@ static void viewer_draws_in_both_modes()
 }
 
 /*********************************************
+ * GUI
+ * *******************************************/
+
+static void gui_api()
+{
+    // In HEADLESS mode the GUI can be enabled, with no effect. Without the GUI, enabling it throws.
+    DQ_MujocoInterface mi(HEADLESS);
+    CHECK(!mi.is_gui_enabled());
+    if (DQ_MujocoInterface::is_gui_available())
+    {
+        mi.set_gui_enabled(true);
+        CHECK(mi.is_gui_enabled());
+        mi.load_model("test_scene.xml");
+        mi.trigger_next_simulation_step();
+        CHECK(!mi.should_close_window());
+        mi.set_gui_enabled(false);
+        CHECK(!mi.is_gui_enabled());
+    }
+    else
+    {
+        CHECK_THROWS(std::runtime_error, mi.set_gui_enabled(true));
+        mi.set_gui_enabled(false);
+        CHECK(!mi.is_gui_enabled());
+    }
+}
+
+static void gui_in_window_mode()
+{
+    if (!DQ_MujocoInterface::is_gui_available())
+    {
+        std::cout << "The library has no GUI: nothing to test" << std::endl;
+        return;
+    }
+    glfwSetErrorCallback(count_glfw_error);
+    {
+        DQ_MujocoInterface mi;
+        mi.set_gui_enabled(true);  // before the window exists
+        mi.load_model(GenericQuadrupedRobot::description().model);
+        mi.reset_simulation("home");
+        mi.trigger_next_simulation_step();
+        show_for(mi, 0.2);
+
+        mi.start_simulation();
+        mi.set_camera_tracking("trunk");
+        show_for(mi, 0.2);
+        mi.set_gui_enabled(false);  // only the 3D view, while running
+        show_for(mi, 0.1);
+        mi.set_gui_enabled(true);
+        show_for(mi, 0.1);
+
+        // Edits that rebuild the GPU context restart the viewer thread: the GUI keeps drawing
+        mi.edit_scene([](DQ_MujocoSceneBuilder& scene) {
+            scene.add_sphere("ball", 1 + 0.5*E_*(0.5*i_ + 1.0*k_), 0.05, BODY::FREE, {1, 0, 0, 1});
+            scene.add_floor("floor2");
+            scene.add_robot(meshed_robot(), "arm2_", 1 + 0.5*E_*(-1.0*i_));
+        });
+        show_for(mi, 0.2);
+        CHECK(mi.is_simulation_running());
+
+        // A smaller model: the panels must not read past its sizes
+        mi.load_model("pendulum.xml");
+        mi.start_simulation();
+        show_for(mi, 0.2);
+        CHECK(mi.get_simulation_time() > 0.1);
+        // destroyed while running
+    }
+    {
+        // Two interfaces with the GUI at once: each viewer thread has its own ImGui context
+        DQ_MujocoInterface a;
+        DQ_MujocoInterface b;
+        a.set_gui_enabled(true);
+        b.set_gui_enabled(true);
+        a.load_model("test_scene.xml");
+        b.load_model("floating_base.xml");
+        a.start_simulation();
+        b.start_simulation();
+        show_for(a, 0.3);
+    }
+    CHECK(glfw_errors == 0);
+}
+
+/*********************************************
  * RUNNER
  * *******************************************/
 
@@ -1939,6 +2021,8 @@ int main(int argc, char** argv)
         {"edit_scene_sensors_while_running", edit_scene_sensors_while_running},
         {"scene_builder_robot_with_meshes", scene_builder_robot_with_meshes},
         {"edit_scene_robot_with_meshes", edit_scene_robot_with_meshes},
+        {"gui_api", gui_api},
+        {"gui_in_window_mode", gui_in_window_mode},
     };
 
     std::vector<std::string> selected;
