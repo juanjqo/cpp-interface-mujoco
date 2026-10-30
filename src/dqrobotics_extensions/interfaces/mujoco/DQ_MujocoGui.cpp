@@ -106,6 +106,17 @@ ImGuiKey glfw_to_imgui_key(const int& key)
     }
 }
 
+/**
+ * @brief add_modifiers gives ImGui the state of the modifier keys (GLFW_MOD_* flags).
+ */
+void add_modifiers(ImGuiIO& io, const int& glfw_mods)
+{
+    io.AddKeyEvent(ImGuiMod_Ctrl, (glfw_mods & GLFW_MOD_CONTROL) != 0);
+    io.AddKeyEvent(ImGuiMod_Shift, (glfw_mods & GLFW_MOD_SHIFT) != 0);
+    io.AddKeyEvent(ImGuiMod_Alt, (glfw_mods & GLFW_MOD_ALT) != 0);
+    io.AddKeyEvent(ImGuiMod_Super, (glfw_mods & GLFW_MOD_SUPER) != 0);
+}
+
 std::string body_label(const mjModel* m, const int& body)
 {
     const char* name = mj_id2name(m, mjOBJ_BODY, body);
@@ -406,9 +417,9 @@ void MujocoGui::_push(const Event& event)
     events_.push_back(event);
 }
 
-void MujocoGui::on_mouse_button(const int& button, const bool& down)
+void MujocoGui::on_mouse_button(const int& button, const bool& down, const int& glfw_mods)
 {
-    _push({Event::Type::MOUSE_BUTTON, button, down ? 1 : 0, 0, 0});
+    _push({Event::Type::MOUSE_BUTTON, button, down ? 1 : 0, static_cast<double>(glfw_mods), 0});
 }
 
 void MujocoGui::on_mouse_move(const double& x, const double& y)
@@ -476,6 +487,8 @@ void MujocoGui::_process_events()
         switch (e.type)
         {
         case Event::Type::MOUSE_BUTTON:
+            // The modifiers first: Ctrl + drag is the perturbation of a body
+            add_modifiers(io, static_cast<int>(e.x));
             // GLFW and ImGui number the left, right and middle buttons alike
             if (e.a >= 0 && e.a < ImGuiMouseButton_COUNT)
                 io.AddMouseButtonEvent(e.a, e.b != 0);
@@ -488,10 +501,20 @@ void MujocoGui::_process_events()
             break;
         case Event::Type::KEY:
         {
-            io.AddKeyEvent(ImGuiMod_Ctrl, (e.b & GLFW_MOD_CONTROL) != 0);
-            io.AddKeyEvent(ImGuiMod_Shift, (e.b & GLFW_MOD_SHIFT) != 0);
-            io.AddKeyEvent(ImGuiMod_Alt, (e.b & GLFW_MOD_ALT) != 0);
-            io.AddKeyEvent(ImGuiMod_Super, (e.b & GLFW_MOD_SUPER) != 0);
+            // X11 gives the modifiers before the key: a modifier key changes its own (as in
+            // imgui_impl_glfw)
+            int mods = e.b;
+            const bool down = e.x != 0;
+            auto set = [&](const int& flag) { mods = down ? (mods | flag) : (mods & ~flag); };
+            if (e.a == GLFW_KEY_LEFT_CONTROL || e.a == GLFW_KEY_RIGHT_CONTROL)
+                set(GLFW_MOD_CONTROL);
+            else if (e.a == GLFW_KEY_LEFT_SHIFT || e.a == GLFW_KEY_RIGHT_SHIFT)
+                set(GLFW_MOD_SHIFT);
+            else if (e.a == GLFW_KEY_LEFT_ALT || e.a == GLFW_KEY_RIGHT_ALT)
+                set(GLFW_MOD_ALT);
+            else if (e.a == GLFW_KEY_LEFT_SUPER || e.a == GLFW_KEY_RIGHT_SUPER)
+                set(GLFW_MOD_SUPER);
+            add_modifiers(io, mods);
             const ImGuiKey key = glfw_to_imgui_key(e.a);
             if (key != ImGuiKey_None)
                 io.AddKeyEvent(key, e.x != 0);
@@ -567,7 +590,7 @@ mjrRect MujocoGui::begin_frame(const Frame& frame)
     // A click in the 3D view selects the body under the cursor. Only a click: a drag moves the
     // camera, and a press on a panel is for the panel.
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-        click_in_view_ = !io.WantCaptureMouse && view_rect.Contains(io.MousePos);
+        click_in_view_ = !io.WantCaptureMouse && !io.KeyCtrl && view_rect.Contains(io.MousePos);
     if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
     {
         if (click_in_view_ && io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left]
@@ -581,6 +604,43 @@ mjrRect MujocoGui::begin_frame(const Frame& frame)
         }
         click_in_view_ = false;
     }
+
+    // Ctrl + drag in the 3D view: MuJoCo's perturbation of the selected body
+    perturb_ = PerturbInput();
+    if (perturb_button_ < 0)
+    {
+        if (selected_body_ > 0 && io.KeyCtrl && !io.WantCaptureMouse && view_rect.Contains(io.MousePos))
+        {
+            for (const ImGuiMouseButton button : {ImGuiMouseButton_Left, ImGuiMouseButton_Right})
+            {
+                if (!ImGui::IsMouseClicked(button))
+                    continue;
+                perturb_button_ = button;
+                perturb_.start = true;
+                perturb_.body = selected_body_;
+                perturb_.active = button == ImGuiMouseButton_Left ? mjPERT_ROTATE : mjPERT_TRANSLATE;
+                // Held at the clicked point, if the body was selected in the 3D view, or at its origin
+                if (picked_body_ == selected_body_)
+                    mju_copy3(perturb_.localpos, picked_point_);
+                break;
+            }
+        }
+    }
+    else if (!ImGui::IsMouseDown(perturb_button_) || selected_body_ <= 0)
+    {
+        perturb_.end = true;
+        perturb_button_ = -1;
+    }
+    else if (ImGui::IsMousePosValid() && (io.MouseDelta.x != 0 || io.MouseDelta.y != 0))
+    {
+        if (perturb_button_ == ImGuiMouseButton_Right)
+            perturb_.action = io.KeyShift ? mjMOUSE_MOVE_H : mjMOUSE_MOVE_V;
+        else
+            perturb_.action = io.KeyShift ? mjMOUSE_ROTATE_H : mjMOUSE_ROTATE_V;
+        perturb_.dx = io.MouseDelta.x / view_rect.GetHeight();
+        perturb_.dy = io.MouseDelta.y / view_rect.GetHeight();
+    }
+    has_selection_ = selected_body_ > 0;
 
     // In pixels, for mjr_render(). OpenGL counts the rows from the bottom.
     mjrRect view = {static_cast<int>(view_rect.Min.x * scale_x),
@@ -605,10 +665,13 @@ void MujocoGui::render()
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
 
-void MujocoGui::select_body(const int& body)
+void MujocoGui::select_body(const int& body, const mjtNum local_point[3])
 {
     selected_body_ = body > 0 ? body : -1;  // the world (e.g., the floor) clears the selection
     reveal_selection_ = selected_body_ > 0;
+    has_selection_ = selected_body_ > 0;
+    picked_body_ = selected_body_;
+    mju_copy3(picked_point_, local_point);
 }
 
 bool MujocoGui::take_pick(Pick& pick)
@@ -809,6 +872,13 @@ void MujocoGui::_status_bar(const Frame& frame)
             ImGui::Text("Step %.0f us", s.step_time_us);
             ImGui::TextDisabled("|");
             ImGui::Text("%.0f FPS", s.fps);
+            if (perturb_button_ >= 0 && selected_body_ > 0)
+            {
+                ImGui::TextDisabled("|");
+                ImGui::TextColored(color(SELECTION), "%s %s",
+                                   perturb_button_ == ImGuiMouseButton_Right ? "Moving" : "Rotating",
+                                   body_label(frame.m, selected_body_).c_str());
+            }
 
             // The name of the model, on the right
             const char* model = frame.m->names;  // the first name is the model's
@@ -994,6 +1064,10 @@ void MujocoGui::_properties_panel(const Frame& frame)
                         frame.tracking_body = name ? name : "";
                     }
                 }
+                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                ImGui::TextWrapped("Ctrl + drag in the 3D view: left rotates the body, right moves it "
+                                   "(Shift: horizontally).");
+                ImGui::PopStyleColor();
             }
         }
     }
@@ -1142,7 +1216,7 @@ void MujocoGui::_visualization_panel(const Frame& frame)
         static const int elements[] = {mjVIS_JOINT, mjVIS_ACTUATOR, mjVIS_COM, mjVIS_INERTIA, mjVIS_CONTACTPOINT,
                                        mjVIS_CONTACTFORCE, mjVIS_TRANSPARENT, mjVIS_CONVEXHULL, mjVIS_CAMERA,
                                        mjVIS_LIGHT, mjVIS_TENDON, mjVIS_RANGEFINDER, mjVIS_CONSTRAINT,
-                                       mjVIS_STATIC, mjVIS_TEXTURE};
+                                       mjVIS_STATIC, mjVIS_TEXTURE, mjVIS_PERTOBJ, mjVIS_PERTFORCE};
         checkboxes("##elements", elements, IM_ARRAYSIZE(elements), mjVISSTRING, opt.flags);
 
         ImGui::SeparatorText("Frames and labels");

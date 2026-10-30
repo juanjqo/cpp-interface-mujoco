@@ -24,7 +24,8 @@ An unofficial [DQ Robotics](https://dqrobotics.github.io) interface for C++17 to
 - Visualization toggles: wireframe, joint axes, contact forces, center of mass, site frames
 - GUI (optional): docked panels around the 3D view, in the style of the editors of 3D tools: the tree of bodies,
   the pose of the selected body, joints within their limits, sensors,
-  visualization options, and play/pause/step/reset controls. Built with [Dear ImGui](https://github.com/ocornut/imgui)
+  visualization options, and play/pause/step/reset controls. Select bodies by clicking them, and push, drag or
+  rotate them with the mouse (Ctrl + drag, MuJoCo's perturbation). Built with [Dear ImGui](https://github.com/ocornut/imgui)
 - Simulation reset, to the initial configuration or to a keyframe of the model
 - Headless mode (no window) for automated tests, CI and batch experiments
 - Generic robots library: generic robot models embedded in the library, loaded by including a header (no model files
@@ -291,6 +292,12 @@ there or by clicking it in the 3D view, and it is highlighted with its children)
 wireframe, joint axes, contact forces, frames, labels, groups, ...). The panels can be moved, docked elsewhere and
 closed (View menu). The menu bar has the simulation controls and the camera (free, following a body, or a camera of
 the model), and the status bar shows the simulation time, the real-time factor and the frame rate.
+
+**Ctrl + drag** in the 3D view interacts with the selected body, as in MuJoCo's simulate (MuJoCo's perturbation):
+left drag rotates it, right drag moves it (with Shift: in the horizontal plane). While the simulation steps, a spring
+force pulls the body towards the mouse, so the robot and its controller respond (e.g., push a quadruped to test its
+balance, or lift an object into a gripper); while it does not run, free and kinematic bodies are moved to the mouse at
+once. The force is only applied while dragging.
 
 Play/pause, step and reset (also with Space, Right and Backspace) act as `start_simulation()`/`stop_simulation()`,
 `trigger_next_simulation_step()` and `reset_simulation()`: they run in the main thread, in `should_close_window()`.
