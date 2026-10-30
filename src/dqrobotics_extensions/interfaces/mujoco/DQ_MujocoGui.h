@@ -207,14 +207,15 @@ private:
     PerturbInput perturb_;
     int perturb_button_ = -1;  // the button that drags the body (-1: none)
 
-    // Gizmo and view cube (ImGuizmo), in the 3D view
+    // Gizmo (ImGuizmo) and navigation gizmo (ImOGuizmo), in the 3D view
     enum class Tool { SELECT, MOVE, ROTATE };
     Tool tool_ = Tool::MOVE;
     bool gizmo_local_ = false;     // the axes of the body, instead of the world's
-    bool show_view_cube_ = true;
+    bool show_navigation_ = true;
+    bool navigation_pressed_ = false;  // the left button was pressed on the navigation gizmo
     bool gizmo_dragging_ = false;
     int gizmo_body_ = -1;          // the body being dragged
-    bool gizmo_hovered_ = false;   // the gizmo, the view cube or the toolbar take the mouse
+    bool gizmo_hovered_ = false;   // the gizmos or the toolbar take the mouse
     GizmoInput gizmo_;
     bool show_scene_ = true;
     bool show_properties_ = true;

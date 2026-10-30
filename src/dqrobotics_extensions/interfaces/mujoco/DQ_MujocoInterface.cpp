@@ -3347,8 +3347,8 @@ bool DQ_MujocoInterface::is_gui_available()
  *   body is held at the gizmo, also while the simulation runs, and free bodies are released with
  *   zero velocity. Fixed bodies keep their new pose, also in edit_scene(); reset_simulation() puts
  *   free and kinematic bodies back.
- * - View cube (top-right corner of the 3D view): click a face, edge or corner to look at the scene
- *   from there, or drag it to turn the camera.
+ * - Navigation gizmo (top-right corner of the 3D view): the axes of the world (X, Y, Z), as in
+ *   Blender. Click an axis to look along it, or drag the gizmo to turn the camera.
  * - Properties: the pose of the selected body (position and rotation), its mass, and a button
  *   to follow it with the camera.
  * - Joints: the position (within its limits) and velocity of each hinge and slide joint.

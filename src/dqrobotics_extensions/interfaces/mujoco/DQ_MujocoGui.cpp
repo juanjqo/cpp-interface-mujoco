@@ -13,6 +13,7 @@ It uses DQ Robotics (https://dqrobotics.github.io) but is not part of DQ Robotic
 #include "imgui_internal.h"
 #include "imgui_impl_opengl3.h"
 #include "ImGuizmo.h"
+#include "imoguizmo.hpp"
 #include "GLFW/glfw3.h"  // key codes and the OpenGL 1.1 functions (glClear, ...)
 #include <algorithm>
 #include <cctype>
@@ -347,30 +348,6 @@ void matrix_to_pose(const float matrix[16], mjtNum pos[3], mjtNum quat[4])
     mju_mat2Quat(quat, rotation);
     mju_normalize4(quat);
 }
-
-// c = a*b
-void multiply(const float a[16], const float b[16], float c[16])
-{
-    for (int col = 0; col < 4; col++)
-        for (int row = 0; row < 4; row++)
-        {
-            float sum = 0;
-            for (int k = 0; k < 4; k++)
-                sum += a[4 * k + row] * b[4 * col + k];
-            c[4 * col + row] = sum;
-        }
-}
-
-// MuJoCo's z axis is up, and the view cube of ImGuizmo turns about y: it gets the view of the same
-// world with y up (x' = x, y' = z, z' = -y)
-const float Z_UP_TO_Y_UP[16] = {1, 0, 0, 0,    // column 0: x -> x'
-                                0, 0, -1, 0,   // column 1: y -> -z'
-                                0, 1, 0, 0,    // column 2: z -> y'
-                                0, 0, 0, 1};
-const float Y_UP_TO_Z_UP[16] = {1, 0, 0, 0,
-                                0, 0, 1, 0,
-                                0, -1, 0, 0,
-                                0, 0, 0, 1};
 
 /**
  * @brief status_dot draws a filled circle aligned with the current line of text.
@@ -737,7 +714,7 @@ mjrRect MujocoGui::begin_frame(const Frame& frame)
         if (central->Size.x > 0 && central->Size.y > 0)
             view_rect = ImRect(central->Pos, central->Pos + central->Size);
 
-    // The gizmo, the view cube and the toolbar, over the 3D view
+    // The gizmo, the navigation gizmo and the toolbar, over the 3D view
     const float overlay_rect[4] = {view_rect.Min.x, view_rect.Min.y, view_rect.Max.x, view_rect.Max.y};
     _viewport_overlay(frame, overlay_rect);
     _viewport_toolbar(overlay_rect);
@@ -939,34 +916,59 @@ void MujocoGui::_viewport_overlay(const Frame& frame, const float view_rect[4])
     gizmo_dragging_ = dragging;
     ImGui::End();
 
-    // The view cube, in the top-right corner (not for the cameras of the model, which are fixed). It
-    // has a window of its own: ImGuizmo takes the mouse for it wherever its window is hovered.
-    if (show_view_cube_ && frame.cam.type != mjCAMERA_FIXED)
+    // The navigation gizmo (ImOGuizmo), in the top-right corner: the axes of the world, as in
+    // Blender. Click an axis to look along it, or drag it to turn the camera (not for the cameras of
+    // the model, which are fixed).
+    if (show_navigation_ && frame.cam.type != mjCAMERA_FIXED)
     {
-        const float cube = 100.0f * content_scale_;
-        const ImVec2 position(origin.x + size.x - cube - 6 * content_scale_, origin.y + 6 * content_scale_);
+        const float gizmo_size = 120.0f * content_scale_;
+        const ImVec2 position(origin.x + size.x - gizmo_size - 4 * content_scale_, origin.y + 4 * content_scale_);
         ImGui::SetNextWindowPos(position);
-        ImGui::SetNextWindowSize(ImVec2(cube, cube));
-        ImGui::Begin("##view_cube", nullptr, flags);
-        ImGuizmo::SetDrawlist();
-        float y_up_view[16], identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-        multiply(view, Y_UP_TO_Z_UP, y_up_view);
-        float before[16];
-        std::copy(y_up_view, y_up_view + 16, before);
-        // Its faces in the colors of MuJoCo's axes (y' is z, and z' is -y). ImGuizmo lightens them
-        // by setting the high bit of each channel, so the channels are 0 or high.
-        style.Colors[ImGuizmo::DIRECTION_X] = color(0xE00000);
-        style.Colors[ImGuizmo::DIRECTION_Y] = color(0x0000E0);
-        style.Colors[ImGuizmo::DIRECTION_Z] = color(0x00B000);
-        ImGuizmo::ViewManipulate(y_up_view, projection, ImGuizmo::TRANSLATE, ImGuizmo::WORLD, identity,
-                                 static_cast<float>(frame.cam.distance), position, ImVec2(cube, cube), 0x00000000);
-        gizmo_hovered_ = gizmo_hovered_ || ImGuizmo::IsViewManipulateHovered() || ImGuizmo::IsUsingViewManipulate();
-        if (!std::equal(before, before + 16, y_up_view))
+        ImGui::SetNextWindowSize(ImVec2(gizmo_size, gizmo_size));
+        ImGui::Begin("##navigation", nullptr, flags);
+        ImOGuizmo::SetRect(position.x, position.y, gizmo_size);
+        ImOGuizmo::SetDrawList();
+        ImOGuizmo::config.positiveRadiusScale = 0.095f;  // the labels (X, Y, Z) fit in the circles
+        ImOGuizmo::config.negativeRadiusScale = 0.06f;
+        ImOGuizmo::config.lineThicknessScale = 0.02f;
+        auto darker = [](const ImU32& c) {
+            const ImVec4 v = ImGui::ColorConvertU32ToFloat4(c);
+            return ImGui::GetColorU32(ImVec4(0.55f * v.x, 0.55f * v.y, 0.55f * v.z, 1.0f));
+        };
+        ImOGuizmo::config.xCircleFrontColor = AXIS_COLORS[0];
+        ImOGuizmo::config.yCircleFrontColor = AXIS_COLORS[1];
+        ImOGuizmo::config.zCircleFrontColor = AXIS_COLORS[2];
+        ImOGuizmo::config.xCircleBackColor = darker(AXIS_COLORS[0]);
+        ImOGuizmo::config.yCircleBackColor = darker(AXIS_COLORS[1]);
+        ImOGuizmo::config.zCircleBackColor = darker(AXIS_COLORS[2]);
+
+        // It reacts to a release over an axis: only if the press was on it (not after a drag of the
+        // camera that ends there)
+        const ImGuiIO& io = ImGui::GetIO();
+        const ImVec2 center = position + ImVec2(gizmo_size, gizmo_size) * 0.5f;
+        const float radius = 0.5f * gizmo_size * ImOGuizmo::config.hoverCircleRadiusScale;
+        const ImVec2 offset = io.MousePos - center;
+        const bool inside = offset.x * offset.x + offset.y * offset.y <= radius * radius;
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+            navigation_pressed_ = inside && !gizmo_hovered_;
+        const bool button = ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+        const bool interactive = navigation_pressed_ || !button;
+
+        float new_view[16];
+        std::copy(view, view + 16, new_view);
+        // The length of its axes follows the projection: a square one with a field of view of 90
+        // degrees (as ImOGuizmo recommends), instead of the camera's
+        const float near = 0.1f, far = 1000.0f;
+        const float gizmo_projection[16] = {1, 0, 0, 0,
+                                            0, 1, 0, 0,
+                                            0, 0, -(far + near) / (far - near), -1,
+                                            0, 0, -2 * far * near / (far - near), 0};
+        // The pivot is the point the camera looks at; MuJoCo's z axis is up (y, z, x: right handed)
+        if (ImOGuizmo::DrawGizmo(new_view, gizmo_projection,
+                                 interactive ? static_cast<float>(frame.cam.distance) : 0.0f,
+                                 ImOGuizmo::CoordinateSystem::YZX))
         {
-            // The new direction of the camera, as MuJoCo's azimuth and elevation (around the same
-            // point: the distance is the one of the camera)
-            float new_view[16];
-            multiply(y_up_view, Z_UP_TO_Y_UP, new_view);
+            // The new direction of the camera, as MuJoCo's azimuth and elevation
             const double fx = -new_view[2], fy = -new_view[6], fz = -new_view[10];
             const double norm = std::sqrt(fx * fx + fy * fy + fz * fz);
             if (norm > 1e-6)
@@ -975,6 +977,9 @@ void MujocoGui::_viewport_overlay(const Frame& frame, const float view_rect[4])
                 frame.cam.elevation = std::clamp(std::asin(fz / norm) * 180.0 / mjPI, -89.5, 89.5);
             }
         }
+        gizmo_hovered_ = gizmo_hovered_ || (interactive && inside) || ImOGuizmo::internal::interaction.dragging;
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+            navigation_pressed_ = false;
         ImGui::End();
     }
 }
@@ -1099,7 +1104,7 @@ void MujocoGui::_menu_bar(const Frame& frame)
         ImGui::MenuItem("Sensors", nullptr, &show_sensors_);
         ImGui::MenuItem("Visualization", nullptr, &show_visualization_);
         ImGui::Separator();
-        ImGui::MenuItem("View cube", nullptr, &show_view_cube_);
+        ImGui::MenuItem("Navigation gizmo", nullptr, &show_navigation_);
         ImGui::Separator();
         if (ImGui::MenuItem("Reset layout"))
         {
