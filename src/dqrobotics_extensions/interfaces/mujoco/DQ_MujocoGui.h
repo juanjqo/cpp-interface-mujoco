@@ -136,6 +136,18 @@ public:
     };
 
     /**
+     * @brief The position given to a joint with its slider (Joints panel) in the last frame. While
+     *        the slider is dragged, the joint is held at that position.
+     */
+    struct JointInput
+    {
+        bool moved = false;  // the slider moved joint to value (rad or m)
+        bool end = false;    // the drag of the slider ended
+        int joint = -1;
+        mjtNum value = 0;
+    };
+
+    /**
      * @param content_scale Scale of the contents of the window (e.g., 2 on a high-DPI display).
      */
     explicit MujocoGui(const float& content_scale);
@@ -172,7 +184,9 @@ public:
     void select_body(const int& body, const mjtNum local_point[3]);
     bool take_pick(Pick& pick);         // the last click in the 3D view, if any
     const PerturbInput& perturb_input() const { return perturb_; }
+    // The pose given to a body with the gizmo or the Pose fields of the Properties panel
     const GizmoInput& gizmo_input() const { return gizmo_; }
+    const JointInput& joint_input() const { return joint_; }
     // Makes the geoms of the selected body and of its children glow, in the selection color (amber) (call it
     // after mjv_updateScene(), which makes the geoms of the frame)
     void highlight_selection(const mjModel* m, mjvScene& scn) const;
@@ -220,6 +234,23 @@ private:
     int gizmo_body_ = -1;          // the body being dragged
     bool gizmo_hovered_ = false;   // the gizmos or the toolbar take the mouse
     GizmoInput gizmo_;
+
+    // The Pose fields of the Properties panel: the values shown for transform_body_, kept while
+    // they are edited. The Euler angles are only computed again when the orientation of the body
+    // changes otherwise (several angles give the same orientation: editing one must not flip the
+    // others).
+    bool euler_rotation_ = true;      // Euler XYZ angles in degrees, or a quaternion
+    int transform_body_ = -1;
+    mjtNum transform_pos_[3] = {0, 0, 0};
+    mjtNum transform_euler_[3] = {0, 0, 0};
+    mjtNum transform_quat_[4] = {1, 0, 0, 0};
+    mjtNum transform_shown_quat_[4] = {1, 0, 0, 0};  // the orientation the fields show
+    bool transform_editing_ = false;  // a field is being edited
+    bool transform_holding_ = false;  // an edit holds the body
+
+    // The joint sliders of the Joints panel
+    JointInput joint_;
+    int joint_holding_ = -1;  // the joint held by its slider (-1: none)
     bool show_scene_ = true;
     bool show_properties_ = true;
     bool show_joints_ = true;
@@ -242,6 +273,7 @@ private:
     void _sensors_panel(const Frame& frame);
     void _visualization_panel(const Frame& frame);
     void _shortcuts(const Frame& frame);
+    void _pose_section(const Frame& frame, const int& body);
     void _viewport_overlay(const Frame& frame, const float view_rect[4]);
     void _viewport_toolbar(const float view_rect[4]);
 };

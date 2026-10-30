@@ -241,6 +241,14 @@ public:
     };
     GizmoHold gizmo_hold_;
     std::vector<std::string> gizmo_moved_fixed_bodies_;
+    // The joint dragged with its slider (Joints panel), held at its position before each step
+    struct JointHold
+    {
+        bool active = false;
+        int joint = -1;
+        mjtNum value = 0;
+    };
+    JointHold joint_hold_;
 #endif
 
     // Camera thread (from the first start_camera() on): renders the cameras offscreen, with its own
@@ -522,6 +530,7 @@ public:
 #ifdef DQ_MUJOCO_HAS_GUI
         gizmo_hold_ = GizmoHold();
         gizmo_moved_fixed_bodies_.clear();
+        joint_hold_ = JointHold();
 #endif
         spec_ = spec;
         vfs_ = std::move(vfs);
@@ -709,6 +718,7 @@ public:
         perturb_force_applied_ = false;
 #ifdef DQ_MUJOCO_HAS_GUI
         gizmo_hold_ = GizmoHold();
+        joint_hold_ = JointHold();
 #endif
 
         // The sizes of the model changed
@@ -983,6 +993,7 @@ public:
                 }
                 _perturb(gui->perturb_input());
                 _gizmo(gui->gizmo_input());
+                _joint(gui->joint_input());
                 mjr_render(viewport, &scn_, &con_);
                 gui->render();
                 gui_drawn = true;
@@ -1154,6 +1165,44 @@ public:
                     gizmo_moved_fixed_bodies_.push_back(name);
             gizmo_hold_.active = false;
         }
+    }
+
+    /**
+     * @brief _joint moves the joint dragged with its slider (GUI) to the position of the slider, and
+     *        holds it there while it is dragged (with zero velocity), as set_joint_positions() does.
+     *        When it is released, its actuator (and the program) move it again. Viewer thread,
+     *        with viewer_mutex_ held.
+     */
+    void _joint(const MujocoGui::JointInput& input)
+    {
+        if (!input.moved && !input.end)
+            return;
+        std::lock_guard<std::mutex> lock(physics_mutex_);
+        const int j = input.joint;
+        if (input.moved && j >= 0 && j < m_->njnt && (m_->jnt_type[j] == mjJNT_HINGE || m_->jnt_type[j] == mjJNT_SLIDE))
+        {
+            joint_hold_.active = true;
+            joint_hold_.joint = j;
+            joint_hold_.value = input.value;
+            _apply_joint_hold();
+            if (simulation_running_)
+                _publish_state();
+            else
+                mj_forward(m_, d_);
+        }
+        if (input.end)
+            joint_hold_.active = false;
+    }
+
+    /**
+     * @brief _apply_joint_hold puts the joint dragged with its slider at its position, with zero
+     *        velocity. The caller holds physics_mutex_.
+     */
+    void _apply_joint_hold()
+    {
+        const int j = joint_hold_.joint;
+        d_->qpos[m_->jnt_qposadr[j]] = joint_hold_.value;
+        d_->qvel[m_->jnt_dofadr[j]] = 0;
     }
 
     /**
@@ -1376,9 +1425,12 @@ public:
             perturb_force_applied_ = false;
         }
 #ifdef DQ_MUJOCO_HAS_GUI
-        // The body dragged with the gizmo stays where the gizmo is
+        // The body dragged with the gizmo stays where the gizmo is, and the joint dragged with its
+        // slider where the slider is
         if (gizmo_hold_.active)
             _apply_gizmo_hold();
+        if (joint_hold_.active)
+            _apply_joint_hold();
 #endif
         const auto start = std::chrono::high_resolution_clock::now();
         mj_step(m_, d_);
@@ -3380,6 +3432,12 @@ bool DQ_MujocoInterface::is_gui_available()
  *   body is held at the gizmo, also while the simulation runs, and free bodies are released with
  *   zero velocity. Fixed bodies keep their new pose, also in edit_scene(); reset_simulation() puts
  *   free and kinematic bodies back.
+ * - Pose fields (Properties panel) for the bodies that the gizmo moves: the position (m) and the
+ *   rotation, as Euler XYZ angles in degrees (about the world X, then Y, then Z axes: roll, pitch,
+ *   yaw) or as a quaternion. Drag a value, or double-click it to type one.
+ * - Joint sliders (Joints panel): move a hinge or slide joint within its limits, as
+ *   set_joint_positions() does; it is held there while the slider is dragged, and then its actuator
+ *   moves it again.
  * - Navigation gizmo (top-right corner of the 3D view): the axes of the world (X, Y, Z), as in
  *   Blender. Click an axis to look along it, or drag the gizmo to turn the camera.
  * - Properties: the pose of the selected body (position and rotation), its mass, and a button

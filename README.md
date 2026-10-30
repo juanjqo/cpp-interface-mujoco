@@ -309,6 +309,13 @@ robot; bodies moved by their joints have none. A dragged body is held at the giz
 `reset_simulation()` puts free and kinematic bodies back. The **navigation gizmo**, in the top-right corner, shows the
 axes of the world (X, Y, Z), as in Blender: click an axis to look along it, or drag the gizmo to turn the camera.
 
+For exact values, the **Pose** fields of the Properties panel set the position (m) and the rotation of those bodies,
+as in Blender, CoppeliaSim and Omniverse: drag a value, or double-click it to type one. The rotation is shown as Euler
+XYZ angles in degrees (about the world X, then Y, then Z axes: roll, pitch and yaw, as Blender's and Omniverse's
+default) or as a quaternion. The **Joints** panel has a slider per hinge and slide joint, within its limits: it moves
+the joint as `set_joint_positions()` does, holds it there while dragged, and then its actuator (and the program) move
+it again.
+
 Play/pause, step and reset (also with Space, Right and Backspace) act as `start_simulation()`/`stop_simulation()`,
 `trigger_next_simulation_step()` and `reset_simulation()`: they run in the main thread, in `should_close_window()`.
 In a program that steps the simulation itself with `trigger_next_simulation_step()`, the program is the clock: play and
