@@ -25,7 +25,8 @@ An unofficial [DQ Robotics](https://dqrobotics.github.io) interface for C++17 to
 - GUI (optional): docked panels around the 3D view, in the style of the editors of 3D tools: the tree of bodies,
   the pose of the selected body, joints within their limits, sensors,
   visualization options, and play/pause/step/reset controls. Select bodies by clicking them, and push, drag or
-  rotate them with the mouse (Ctrl + drag, MuJoCo's perturbation). Built with [Dear ImGui](https://github.com/ocornut/imgui)
+  rotate them with the mouse (Ctrl + drag, MuJoCo's perturbation), or place them with a gizmo, and turn the camera
+  with a view cube. Built with [Dear ImGui](https://github.com/ocornut/imgui)
 - Simulation reset, to the initial configuration or to a keyframe of the model
 - Headless mode (no window) for automated tests, CI and batch experiments
 - Generic robots library: generic robot models embedded in the library, loaded by including a header (no model files
@@ -52,7 +53,7 @@ An unofficial [DQ Robotics](https://dqrobotics.github.io) interface for C++17 to
 | [DQ Robotics C++](https://github.com/dqrobotics/cpp) | Install manually (see below) |
 | Eigen3, GLFW, OpenGL | System packages |
 | EGL (optional, Linux) | System package. It renders the cameras in HEADLESS mode (no display needed); without it, cameras need WINDOW mode |
-| [Dear ImGui](https://github.com/ocornut/imgui) 1.93.0 (docking branch) | For the GUI (`DQ_MUJOCO_BUILD_GUI`, ON by default). Downloaded automatically by CMake and built into the library, with its symbols hidden: it is not installed, and projects that use this library need nothing else (they can use their own ImGui) |
+| [Dear ImGui](https://github.com/ocornut/imgui) 1.93.0 (docking branch) and [ImGuizmo](https://github.com/CedricGuillemet/ImGuizmo) | For the GUI (`DQ_MUJOCO_BUILD_GUI`, ON by default). Downloaded automatically by CMake and built into the library, with their symbols hidden: they are not installed, and projects that use this library need nothing else (they can use their own ImGui) |
 
 Ubuntu:
 
@@ -298,6 +299,14 @@ left drag rotates it, right drag moves it (with Shift: in the horizontal plane).
 force pulls the body towards the mouse, so the robot and its controller respond (e.g., push a quadruped to test its
 balance, or lift an object into a gripper); while it does not run, free and kinematic bodies are moved to the mouse at
 once. The force is only applied while dragging.
+
+The **gizmo**, as in Omniverse, moves (W) and rotates (E) the selected body with handles, in the world or body axes
+(toolbar in the top-left corner of the 3D view; Q hides it). It moves free bodies (objects, floating bases),
+kinematic bodies, and fixed bodies attached to the world, such as the base of a fixed robot, which moves the whole
+robot; bodies moved by their joints have none. A dragged body is held at the gizmo, also while the simulation runs
+(free bodies are released with zero velocity). Fixed bodies keep their new pose, also in `edit_scene()`;
+`reset_simulation()` puts free and kinematic bodies back. The **view cube**, in the top-right corner, turns the camera:
+click a face, edge or corner to look from there, or drag it.
 
 Play/pause, step and reset (also with Space, Right and Backspace) act as `start_simulation()`/`stop_simulation()`,
 `trigger_next_simulation_step()` and `reset_simulation()`: they run in the main thread, in `should_close_window()`.
