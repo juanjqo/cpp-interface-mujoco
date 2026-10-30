@@ -23,7 +23,7 @@ An unofficial [DQ Robotics](https://dqrobotics.github.io) interface for C++17 to
 - Reference frames: draw named frames at runtime from dual quaternion poses, without editing the XML model
 - Visualization toggles: wireframe, joint axes, contact forces, center of mass, site frames
 - GUI (optional): docked panels around the 3D view, in the style of the editors of 3D tools: the tree of bodies,
-  the pose of the selected body (also as a unit dual quaternion), joints within their limits, sensors,
+  the pose of the selected body, joints within their limits, sensors,
   visualization options, and play/pause/step/reset controls. Built with [Dear ImGui](https://github.com/ocornut/imgui)
 - Simulation reset, to the initial configuration or to a keyframe of the model
 - Headless mode (no window) for automated tests, CI and batch experiments
@@ -286,7 +286,7 @@ mi.load_model(scene.build());
 
 The GUI surrounds the 3D view with docked panels: **Scene** (the tree of bodies, with a search box; select a body
 there or by clicking it in the 3D view, and it is highlighted with its children), **Properties**
-(the pose of the selected body: position, rotation and unit dual quaternion; its mass; follow it with the camera),
+(the pose of the selected body: position and rotation; its mass; follow it with the camera),
 **Joints** (positions within their limits, and velocities), **Sensors**, and **Visualization** (shadows, reflections,
 wireframe, joint axes, contact forces, frames, labels, groups, ...). The panels can be moved, docked elsewhere and
 closed (View menu). The menu bar has the simulation controls and the camera (free, following a body, or a camera of

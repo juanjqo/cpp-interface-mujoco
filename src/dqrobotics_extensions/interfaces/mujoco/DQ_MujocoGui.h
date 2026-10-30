@@ -128,7 +128,7 @@ public:
     int selected_body() const { return selected_body_; }
     void select_body(const int& body);  // from the 3D view: the Scene panel reveals it
     bool take_pick(Pick& pick);         // the last click in the 3D view, if any
-    // Makes the geoms of the selected body and of its children glow, in the accent color (call it
+    // Makes the geoms of the selected body and of its children glow, in the selection color (amber) (call it
     // after mjv_updateScene(), which makes the geoms of the frame)
     void highlight_selection(const mjModel* m, mjvScene& scn) const;
 

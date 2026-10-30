@@ -13,14 +13,12 @@ It uses DQ Robotics (https://dqrobotics.github.io) but is not part of DQ Robotic
 #include "imgui_internal.h"
 #include "imgui_impl_opengl3.h"
 #include "GLFW/glfw3.h"  // key codes and the OpenGL 1.1 functions (glClear, ...)
-#include <dqrobotics/DQ.h>
 #include <algorithm>
 #include <cctype>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <functional>
-#include <sstream>
 
 // The current ImGui context of each thread (see dq_mujoco_imconfig.h)
 thread_local ImGuiContext* DQMujocoImGuiContext = nullptr;
@@ -56,6 +54,7 @@ ImVec4 color(const unsigned int& rgb, const float& alpha = 1.0f)
 }
 
 const unsigned int ACCENT = 0x4FA3E0;
+const unsigned int SELECTION = 0xFFB020;   // amber: stands out against the blue floor and robots
 const unsigned int BACKGROUND = 0x1F2125;  // also behind the 3D view while it is drawn
 const ImU32 AXIS_COLORS[4] = {IM_COL32(200, 70, 70, 255),    // x: red
                               IM_COL32(95, 165, 60, 255),    // y: green
@@ -626,7 +625,7 @@ void MujocoGui::highlight_selection(const mjModel* m, mjvScene& scn) const
     const int root = selected_body_;
     if (root <= 0 || root >= m->nbody)
         return;
-    const ImVec4 accent = color(ACCENT);
+    const ImVec4 highlight = color(SELECTION);
     for (int i = 0; i < scn.ngeom; i++)
     {
         mjvGeom& geom = scn.geoms[i];
@@ -638,10 +637,12 @@ void MujocoGui::highlight_selection(const mjModel* m, mjvScene& scn) const
             body = m->body_parentid[body];
         if (body != root)
             continue;
-        geom.emission += 0.3f;
-        geom.rgba[0] = 0.55f * geom.rgba[0] + 0.45f * accent.x;
-        geom.rgba[1] = 0.55f * geom.rgba[1] + 0.45f * accent.y;
-        geom.rgba[2] = 0.55f * geom.rgba[2] + 0.45f * accent.z;
+        // Mostly the selection color, so that the hue does not mix with that of the geom (blue and
+        // amber would make gray), with some of the geom's color to keep its shading and texture
+        geom.emission += 0.2f;
+        geom.rgba[0] = 0.35f * geom.rgba[0] + 0.65f * highlight.x;
+        geom.rgba[1] = 0.35f * geom.rgba[1] + 0.65f * highlight.y;
+        geom.rgba[2] = 0.35f * geom.rgba[2] + 0.65f * highlight.z;
     }
 }
 
@@ -950,19 +951,6 @@ void MujocoGui::_properties_panel(const Frame& frame)
             static const ImU32 quaternion_colors[4] = {AXIS_COLORS[3], AXIS_COLORS[0], AXIS_COLORS[1], AXIS_COLORS[2]};
             vector_row("Position", p, 3, xyz, AXIS_COLORS);
             vector_row("Rotation", q, 4, wxyz, quaternion_colors);
-
-            // The pose as a unit dual quaternion, as get_body_pose() returns it
-            using namespace DQ_robotics;
-            const DQ r(q[0], q[1], q[2], q[3]);
-            const DQ t(0, p[0], p[1], p[2]);
-            std::ostringstream pose;
-            pose << r + 0.5 * E_ * t * r;
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted("Dual quat.");
-            ImGui::SameLine(ImGui::GetFontSize() * 6.0f);
-            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-            ImGui::TextWrapped("%s", pose.str().c_str());
-            ImGui::PopStyleColor();
         }
 
         if (ImGui::CollapsingHeader("Body", ImGuiTreeNodeFlags_DefaultOpen))

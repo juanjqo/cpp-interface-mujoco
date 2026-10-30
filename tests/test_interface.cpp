@@ -1942,10 +1942,14 @@ static void gui_in_window_mode()
         show_for(mi, 0.2);
         CHECK(mi.is_simulation_running());
 
-        // A smaller model: the panels must not read past its sizes
+        // A smaller model: the panels must not read past its sizes. The simulation runs (waits for
+        // it, since a loaded machine can fall behind real time).
         mi.load_model("pendulum.xml");
         mi.start_simulation();
         show_for(mi, 0.2);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (mi.get_simulation_time() <= 0.1 && std::chrono::steady_clock::now() < deadline)
+            show_for(mi, 0.05);
         CHECK(mi.get_simulation_time() > 0.1);
         // destroyed while running
     }
