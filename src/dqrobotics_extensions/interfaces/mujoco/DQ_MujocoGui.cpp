@@ -559,18 +559,35 @@ mjrRect MujocoGui::begin_frame(const Frame& frame)
     _visualization_panel(frame);
     wants_mouse_ = io.WantCaptureMouse;
 
-    // The 3D view is drawn in the free (central) area of the dock space. OpenGL counts the rows
-    // from the bottom.
-    mjrRect view = {0, 0, frame.framebuffer_width, frame.framebuffer_height};
+    // The 3D view is drawn in the free (central) area of the dock space
+    ImRect view_rect(ImVec2(0, 0), io.DisplaySize);
     if (ImGuiDockNode* central = ImGui::DockBuilderGetCentralNode(dockspace_id))
+        if (central->Size.x > 0 && central->Size.y > 0)
+            view_rect = ImRect(central->Pos, central->Pos + central->Size);
+
+    // A click in the 3D view selects the body under the cursor. Only a click: a drag moves the
+    // camera, and a press on a panel is for the panel.
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        click_in_view_ = !io.WantCaptureMouse && view_rect.Contains(io.MousePos);
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
     {
-        const int left = static_cast<int>(central->Pos.x * scale_x);
-        const int top = static_cast<int>(central->Pos.y * scale_y);
-        const int width = static_cast<int>(central->Size.x * scale_x);
-        const int height = static_cast<int>(central->Size.y * scale_y);
-        if (width > 0 && height > 0)
-            view = {left, frame.framebuffer_height - top - height, width, height};
+        if (click_in_view_ && io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left]
+                                  < io.MouseDragThreshold * io.MouseDragThreshold)
+        {
+            const ImVec2 p = io.MouseClickedPos[ImGuiMouseButton_Left];
+            pick_.relx = (p.x - view_rect.Min.x) / view_rect.GetWidth();
+            pick_.rely = (view_rect.Max.y - p.y) / view_rect.GetHeight();  // from the bottom
+            pick_.aspect_ratio = view_rect.GetWidth() / view_rect.GetHeight();
+            pick_requested_ = true;
+        }
+        click_in_view_ = false;
     }
+
+    // In pixels, for mjr_render(). OpenGL counts the rows from the bottom.
+    mjrRect view = {static_cast<int>(view_rect.Min.x * scale_x),
+                    frame.framebuffer_height - static_cast<int>(view_rect.Max.y * scale_y),
+                    static_cast<int>(view_rect.GetWidth() * scale_x),
+                    static_cast<int>(view_rect.GetHeight() * scale_y)};
 
     // Clear the whole window: mjr_render() only draws the 3D view
     const ImVec4 background = color(BACKGROUND);
@@ -587,6 +604,45 @@ void MujocoGui::render()
     ImGui::Render();
     std::lock_guard<std::mutex> lock(opengl_backend_mutex());
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+}
+
+void MujocoGui::select_body(const int& body)
+{
+    selected_body_ = body > 0 ? body : -1;  // the world (e.g., the floor) clears the selection
+    reveal_selection_ = selected_body_ > 0;
+}
+
+bool MujocoGui::take_pick(Pick& pick)
+{
+    if (!pick_requested_)
+        return false;
+    pick = pick_;
+    pick_requested_ = false;
+    return true;
+}
+
+void MujocoGui::highlight_selection(const mjModel* m, mjvScene& scn) const
+{
+    const int root = selected_body_;
+    if (root <= 0 || root >= m->nbody)
+        return;
+    const ImVec4 accent = color(ACCENT);
+    for (int i = 0; i < scn.ngeom; i++)
+    {
+        mjvGeom& geom = scn.geoms[i];
+        if (geom.objtype != mjOBJ_GEOM || geom.objid < 0 || geom.objid >= m->ngeom)
+            continue;  // decorations: frames, contacts, labels, ...
+        // MuJoCo numbers the bodies in tree order (a parent before its children)
+        int body = m->geom_bodyid[geom.objid];
+        while (body > root)
+            body = m->body_parentid[body];
+        if (body != root)
+            continue;
+        geom.emission += 0.3f;
+        geom.rgba[0] = 0.55f * geom.rgba[0] + 0.45f * accent.x;
+        geom.rgba[1] = 0.55f * geom.rgba[1] + 0.45f * accent.y;
+        geom.rgba[2] = 0.55f * geom.rgba[2] + 0.45f * accent.z;
+    }
 }
 
 void MujocoGui::_dock_layout(const unsigned int& dockspace_id)
@@ -627,6 +683,8 @@ void MujocoGui::_shortcuts(const Frame& frame)
         _request({false, true, false, -1});
     if (ImGui::IsKeyPressed(ImGuiKey_Backspace, false))
         _request({false, false, true, -1});
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        selected_body_ = -1;
 }
 
 
@@ -790,6 +848,16 @@ void MujocoGui::_scene_panel(const Frame& frame)
 
         if (ImGui::BeginChild("##bodies"))
         {
+            // A body selected in the 3D view: open its ancestors and scroll to it
+            std::vector<char> reveal(m->nbody, 0);
+            if (reveal_selection_ && selected_body_ > 0 && selected_body_ < m->nbody)
+                for (int b = m->body_parentid[selected_body_]; b > 0; b = m->body_parentid[b])
+                    reveal[b] = 1;
+            auto scroll_to_selection = [&](const int& b) {
+                if (reveal_selection_ && b == selected_body_)
+                    ImGui::SetScrollHereY(0.5f);
+            };
+
             if (filter_[0])
             {
                 // Search: a flat list of the matching bodies
@@ -801,6 +869,7 @@ void MujocoGui::_scene_panel(const Frame& frame)
                     ImGui::PushID(b);
                     if (ImGui::Selectable(label.c_str(), selected_body_ == b))
                         selected_body_ = b;
+                    scroll_to_selection(b);
                     badge(b);
                     ImGui::PopID();
                 }
@@ -820,10 +889,13 @@ void MujocoGui::_scene_panel(const Frame& frame)
                         flags |= ImGuiTreeNodeFlags_DefaultOpen;
                     if (selected_body_ == b)
                         flags |= ImGuiTreeNodeFlags_Selected;
+                    if (reveal[b])
+                        ImGui::SetNextItemOpen(true);
                     const bool open = ImGui::TreeNodeEx(reinterpret_cast<void*>(static_cast<intptr_t>(b)), flags,
                                                         "%s", body_label(m, b).c_str());
                     if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
                         selected_body_ = b;
+                    scroll_to_selection(b);
                     badge(b);
                     if (open && !children[b].empty())
                     {
@@ -834,6 +906,7 @@ void MujocoGui::_scene_panel(const Frame& frame)
                 };
                 draw(0);
             }
+            reveal_selection_ = false;
         }
         ImGui::EndChild();
     }

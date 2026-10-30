@@ -86,6 +86,16 @@ public:
     };
 
     /**
+     * @brief A click in the 3D view (not a drag of the camera), to select the body under the cursor
+     *        with mjv_select(): the point relative to the 3D view, from its bottom-left corner.
+     */
+    struct Pick
+    {
+        double relx = 0, rely = 0;
+        double aspect_ratio = 1;
+    };
+
+    /**
      * @param content_scale Scale of the contents of the window (e.g., 2 on a high-DPI display).
      */
     explicit MujocoGui(const float& content_scale);
@@ -114,6 +124,14 @@ public:
     mjrRect begin_frame(const Frame& frame);
     void render();  // draws the GUI over the 3D view
 
+    // Viewer thread, with the viewer lock held: the selected body (-1: none)
+    int selected_body() const { return selected_body_; }
+    void select_body(const int& body);  // from the 3D view: the Scene panel reveals it
+    bool take_pick(Pick& pick);         // the last click in the 3D view, if any
+    // Makes the geoms of the selected body and of its children glow, in the accent color (call it
+    // after mjv_updateScene(), which makes the geoms of the frame)
+    void highlight_selection(const mjModel* m, mjvScene& scn) const;
+
 private:
     struct Event
     {
@@ -137,6 +155,10 @@ private:
 
     // State of the panels (viewer thread only)
     int selected_body_ = -1;
+    bool reveal_selection_ = false;  // open the tree of the Scene panel at the selected body
+    bool click_in_view_ = false;     // the left button was pressed in the 3D view
+    bool pick_requested_ = false;
+    Pick pick_;
     bool show_scene_ = true;
     bool show_properties_ = true;
     bool show_joints_ = true;
