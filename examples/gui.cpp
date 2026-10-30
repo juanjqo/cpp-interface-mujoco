@@ -18,7 +18,8 @@ library, a quadruped (with the IMU of its model), a rangefinder, a camera, and a
   - Ctrl + drag in the 3D view: right drag moves the selected body (with Shift: horizontally), left
     drag rotates it. Lift the crate, or push the quadruped and watch its controller respond.
   - Gizmo (toolbar in the 3D view, or W and E): place the selected body with handles. Select
-    "arm_base" to move the whole arm. The navigation gizmo (top-right corner) shows the axes of
+    "arm_base" to move the whole arm. Or type exact values in the Pose fields of the Properties
+    panel, and move the joints with their sliders in the Joints panel. The navigation gizmo (top-right corner) shows the axes of
     the world: click an axis to look along it, or drag it to turn the camera.
   - Joints and Sensors panels: the joint positions within their limits, and the values of the
     IMU of the quadruped and of the rangefinder.

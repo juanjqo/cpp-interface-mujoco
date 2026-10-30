@@ -353,6 +353,81 @@ void matrix_to_pose(const float matrix[16], mjtNum pos[3], mjtNum quat[4])
     mju_normalize4(quat);
 }
 
+//--------------------------------------------------------------------------------------------------
+// Euler angles: XYZ about the fixed world axes (first X, then Y, then Z: R = Rz*Ry*Rx), in degrees.
+// The convention of Blender's and Omniverse's default, and of ROS's roll, pitch and yaw.
+//--------------------------------------------------------------------------------------------------
+
+void quat_to_euler_xyz(const mjtNum q[4], mjtNum euler[3])
+{
+    const mjtNum w = q[0], x = q[1], y = q[2], z = q[3];
+    const mjtNum degrees = 180.0 / mjPI;
+    euler[0] = std::atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)) * degrees;
+    euler[1] = std::asin(std::clamp(2 * (w * y - z * x), -1.0, 1.0)) * degrees;
+    euler[2] = std::atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)) * degrees;
+}
+
+void euler_xyz_to_quat(const mjtNum euler[3], mjtNum q[4])
+{
+    const mjtNum radians = mjPI / 180.0;
+    mjtNum qx[4] = {std::cos(0.5 * euler[0] * radians), std::sin(0.5 * euler[0] * radians), 0, 0};
+    mjtNum qy[4] = {std::cos(0.5 * euler[1] * radians), 0, std::sin(0.5 * euler[1] * radians), 0};
+    mjtNum qz[4] = {std::cos(0.5 * euler[2] * radians), 0, 0, std::sin(0.5 * euler[2] * radians)};
+    mjtNum qzy[4];
+    mju_mulQuat(qzy, qz, qy);
+    mju_mulQuat(q, qzy, qx);
+}
+
+// Whether two unit quaternions are the same orientation (q and -q are)
+bool same_orientation(const mjtNum a[4], const mjtNum b[4])
+{
+    const mjtNum dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    return std::abs(dot) > 1 - 1e-9;
+}
+
+/**
+ * @brief edit_row shows a labeled row of editable values, each with a colored axis tag: drag a
+ *        value, or double-click (Ctrl + click) it to type one.
+ */
+struct EditState
+{
+    bool edited = false;  // a value changed in this frame
+    bool active = false;  // a value is being edited
+};
+void edit_row(const char* label, mjtNum* values, const int& n, const char* const* names, const ImU32* colors,
+              const float& speed, const char* format, EditState& state)
+{
+    ImGui::PushID(label);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine(ImGui::GetFontSize() * 6.0f);
+    const float spacing = ImGui::GetStyle().ItemInnerSpacing.x;
+    const float width = std::max(10.0f, (ImGui::GetContentRegionAvail().x - spacing * (n - 1)) / n);
+    const float h = ImGui::GetFrameHeight();
+    const float tag = h * 0.9f;
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    for (int i = 0; i < n; i++)
+    {
+        if (i > 0)
+            ImGui::SameLine(0, spacing);
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        draw->AddRectFilled(p, p + ImVec2(tag, h), colors[i], ImGui::GetStyle().FrameRounding, ImDrawFlags_RoundLeft);
+        const ImVec2 name_size = ImGui::CalcTextSize(names[i]);
+        draw->AddText(p + ImVec2((tag - name_size.x) * 0.5f, (h - name_size.y) * 0.5f), IM_COL32(255, 255, 255, 235),
+                      names[i]);
+        ImGui::Dummy(ImVec2(tag, h));
+        ImGui::SameLine(0, 0);
+        ImGui::PushID(i);
+        ImGui::SetNextItemWidth(std::max(10.0f, width - tag));
+        ImGui::DragScalar("##value", ImGuiDataType_Double, &values[i], speed, nullptr, nullptr, format,
+                          ImGuiSliderFlags_NoRoundToFormat);
+        state.edited = state.edited || ImGui::IsItemEdited();
+        state.active = state.active || ImGui::IsItemActive();
+        ImGui::PopID();
+    }
+    ImGui::PopID();
+}
+
 /**
  * @brief status_dot draws a filled circle aligned with the current line of text.
  */
@@ -705,6 +780,8 @@ mjrRect MujocoGui::begin_frame(const Frame& frame)
 
     if (selected_body_ >= frame.m->nbody)
         selected_body_ = -1;  // the scene was edited
+    gizmo_ = GizmoInput();  // set by the Properties panel or the gizmo
+    joint_ = JointInput();
     _scene_panel(frame);
     _properties_panel(frame);
     _joints_panel(frame);
@@ -849,7 +926,6 @@ void MujocoGui::highlight_selection(const mjModel* m, mjvScene& scn) const
 
 void MujocoGui::_viewport_overlay(const Frame& frame, const float view_rect[4])
 {
-    gizmo_ = GizmoInput();
     gizmo_hovered_ = false;
     const mjModel* m = frame.m;
     const ImVec2 origin(view_rect[0], view_rect[1]);
@@ -1328,6 +1404,15 @@ void MujocoGui::_scene_panel(const Frame& frame)
 
 void MujocoGui::_properties_panel(const Frame& frame)
 {
+    // An edit of the pose ends when its body is no longer shown (Escape, another body, the panel
+    // closed): the body is released
+    if (transform_holding_ && (selected_body_ != transform_body_ || !show_properties_))
+    {
+        gizmo_.end = true;
+        gizmo_.body = transform_body_;
+        transform_holding_ = false;
+        transform_editing_ = false;
+    }
     if (!show_properties_)
         return;
     if (ImGui::Begin("Properties", &show_properties_))
@@ -1355,15 +1440,7 @@ void MujocoGui::_properties_panel(const Frame& frame)
         ImGui::Spacing();
 
         if (ImGui::CollapsingHeader("Pose", ImGuiTreeNodeFlags_DefaultOpen))
-        {
-            const mjtNum* p = frame.state.xpos.data() + 3 * b;
-            const mjtNum* q = frame.state.xquat.data() + 4 * b;
-            static const char* const xyz[3] = {"X", "Y", "Z"};
-            static const char* const wxyz[4] = {"W", "X", "Y", "Z"};
-            static const ImU32 quaternion_colors[4] = {AXIS_COLORS[3], AXIS_COLORS[0], AXIS_COLORS[1], AXIS_COLORS[2]};
-            vector_row("Position", p, 3, xyz, AXIS_COLORS);
-            vector_row("Rotation", q, 4, wxyz, quaternion_colors);
-        }
+            _pose_section(frame, b);
 
         if (ImGui::CollapsingHeader("Body", ImGuiTreeNodeFlags_DefaultOpen))
         {
@@ -1414,6 +1491,8 @@ void MujocoGui::_properties_panel(const Frame& frame)
                 case Movable::FIXED:     ImGui::TextWrapped("Gizmo (W, E): moves the body and its children."); break;
                 case Movable::NONE:      ImGui::TextWrapped("Moved by its joints: no gizmo."); break;
                 }
+                if (movable(m, b) != Movable::NONE)
+                    ImGui::TextWrapped("Pose: drag a value, or double-click it to type one.");
                 ImGui::TextWrapped("Ctrl + drag in the 3D view: left rotates the body, right moves it "
                                    "(Shift: horizontally).");
                 ImGui::PopStyleColor();
@@ -1421,10 +1500,96 @@ void MujocoGui::_properties_panel(const Frame& frame)
         }
     }
     ImGui::End();
+
+    // The edit of the pose ended: the body is released
+    if (transform_holding_ && !transform_editing_)
+    {
+        gizmo_.end = true;
+        gizmo_.body = transform_body_;
+        transform_holding_ = false;
+        transform_editing_ = false;
+    }
+}
+
+void MujocoGui::_pose_section(const Frame& frame, const int& b)
+{
+    const mjModel* m = frame.m;
+    const mjtNum* p = frame.state.xpos.data() + 3 * b;
+    const mjtNum* q = frame.state.xquat.data() + 4 * b;
+    static const char* const xyz[3] = {"X", "Y", "Z"};
+    static const char* const wxyz[4] = {"W", "X", "Y", "Z"};
+    static const ImU32 quaternion_colors[4] = {AXIS_COLORS[3], AXIS_COLORS[0], AXIS_COLORS[1], AXIS_COLORS[2]};
+
+    // The values shown: those of the body, except while they are edited
+    if (!transform_editing_)
+    {
+        mju_copy3(transform_pos_, p);
+        if (b != transform_body_ || !same_orientation(q, transform_shown_quat_))
+        {
+            mju_copy4(transform_shown_quat_, q);
+            mju_copy4(transform_quat_, q);
+            quat_to_euler_xyz(q, transform_euler_);
+        }
+    }
+    transform_body_ = b;
+
+    // In the world frame (the bodies that can be moved are attached to the world)
+    if (movable(m, b) == Movable::NONE)
+    {
+        vector_row("Position", p, 3, xyz, AXIS_COLORS);
+        if (euler_rotation_)
+            vector_row("Rotation", transform_euler_, 3, xyz, AXIS_COLORS);
+        else
+            vector_row("Rotation", q, 4, wxyz, quaternion_colors);
+    }
+    else
+    {
+        EditState state;
+        edit_row("Position", transform_pos_, 3, xyz, AXIS_COLORS, 0.001f, "%.4f", state);
+        if (euler_rotation_)
+            edit_row("Rotation", transform_euler_, 3, xyz, AXIS_COLORS, 0.1f, "%.2f\u00b0", state);
+        else
+            edit_row("Rotation", transform_quat_, 4, wxyz, quaternion_colors, 0.001f, "%.4f", state);
+        if (state.edited)
+        {
+            mjtNum quat[4];
+            if (euler_rotation_)
+                euler_xyz_to_quat(transform_euler_, quat);
+            else
+                mju_copy4(quat, transform_quat_);
+            if (mju_normalize4(quat) > mjMINVAL)  // a zero quaternion is no orientation
+            {
+                gizmo_.moved = true;
+                gizmo_.body = b;
+                mju_copy3(gizmo_.pos, transform_pos_);
+                mju_copy4(gizmo_.quat, quat);
+                mju_copy4(transform_shown_quat_, quat);
+                transform_holding_ = true;
+            }
+        }
+        transform_editing_ = state.active;
+    }
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("Rotation as");
+    ImGui::SameLine(ImGui::GetFontSize() * 6.0f);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    int mode = euler_rotation_ ? 0 : 1;
+    if (ImGui::Combo("##rotation_mode", &mode, "Euler XYZ (degrees)\0Quaternion (w, x, y, z)\0"))
+        euler_rotation_ = mode == 0;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Euler XYZ: rotations about the world X, then Y, then Z axes (roll, pitch, yaw)");
 }
 
 void MujocoGui::_joints_panel(const Frame& frame)
 {
+    // A slider being dragged when the panel is closed, or the model changed: release its joint
+    if (joint_holding_ >= 0 && (!show_joints_ || joint_holding_ >= frame.m->njnt))
+    {
+        joint_.end = true;
+        joint_.joint = joint_holding_;
+        joint_holding_ = -1;
+    }
     if (!show_joints_)
         return;
     if (ImGui::Begin("Joints", &show_joints_))
@@ -1439,7 +1604,7 @@ void MujocoGui::_joints_panel(const Frame& frame)
         {
             ImGui::TableSetupScrollFreeze(0, 1);
             ImGui::TableSetupColumn("Joint", ImGuiTableColumnFlags_None, 1.1f);
-            ImGui::TableSetupColumn("Position", ImGuiTableColumnFlags_None, 1.2f);
+            ImGui::TableSetupColumn("Position (rad, m)", ImGuiTableColumnFlags_None, 1.2f);
             ImGui::TableSetupColumn("Velocity", ImGuiTableColumnFlags_None, 0.7f);
             ImGui::TableHeadersRow();
             for (int j = 0; j < m->njnt; j++)
@@ -1457,26 +1622,46 @@ void MujocoGui::_joints_panel(const Frame& frame)
                 ImGui::PushID(j);
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
-                if (ImGui::Selectable(object_label(m, mjOBJ_JOINT, j, "joint").c_str(),
-                                      m->jnt_bodyid[j] == selected_body_, ImGuiSelectableFlags_SpanAllColumns))
+                ImGui::AlignTextToFramePadding();
+                if (ImGui::Selectable(object_label(m, mjOBJ_JOINT, j, "joint").c_str(), m->jnt_bodyid[j] == selected_body_,
+                                      ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap))
                     selected_body_ = m->jnt_bodyid[j];
                 ImGui::TableNextColumn();
-                char text[32];
-                std::snprintf(text, sizeof(text), "%.3f", q);
-                if (m->jnt_limited[j] && m->jnt_range[2 * j + 1] > m->jnt_range[2 * j])
+
+                // The slider of the joint (within its limits): moves it (as set_joint_positions())
+                mjtNum value = q;
+                bool changed;
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                const bool limited = m->jnt_limited[j] && m->jnt_range[2 * j + 1] > m->jnt_range[2 * j];
+                if (limited)
                 {
-                    // Position within the limits
-                    const double low = m->jnt_range[2 * j], high = m->jnt_range[2 * j + 1];
-                    const float fraction = static_cast<float>(std::clamp((q - low) / (high - low), 0.0, 1.0));
-                    ImGui::ProgressBar(fraction, ImVec2(-FLT_MIN, 0), text);
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("%.4f %s, limits [%.4f, %.4f]", q, unit, low, high);
+                    const mjtNum low = m->jnt_range[2 * j], high = m->jnt_range[2 * j + 1];
+                    changed = ImGui::SliderScalar("##position", ImGuiDataType_Double, &value, &low, &high, "%.3f",
+                                                  ImGuiSliderFlags_NoRoundToFormat);
+                    if (ImGui::IsItemHovered() && !ImGui::IsItemActive())
+                        ImGui::SetTooltip("%.4f %s, limits [%.4f, %.4f]\nDrag, or double-click to type a value",
+                                          q, unit, low, high);
                 }
                 else
                 {
-                    ImGui::TextUnformatted(text);
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("%.4f %s", q, unit);
+                    changed = ImGui::DragScalar("##position", ImGuiDataType_Double, &value,
+                                                type == mjJNT_HINGE ? 0.005f : 0.001f, nullptr, nullptr, "%.3f",
+                                                ImGuiSliderFlags_NoRoundToFormat);
+                    if (ImGui::IsItemHovered() && !ImGui::IsItemActive())
+                        ImGui::SetTooltip("%.4f %s (no limits)\nDrag, or double-click to type a value", q, unit);
+                }
+                if (changed)
+                {
+                    joint_.moved = true;
+                    joint_.joint = j;
+                    joint_.value = value;
+                    joint_holding_ = j;
+                }
+                if (joint_holding_ == j && !ImGui::IsItemActive())
+                {
+                    joint_.end = true;
+                    joint_.joint = j;
+                    joint_holding_ = -1;
                 }
                 ImGui::TableNextColumn();
                 ImGui::Text("%.3f", s.qvel[vadr]);
