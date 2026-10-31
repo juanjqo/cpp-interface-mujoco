@@ -38,7 +38,7 @@ if(WIN32 AND NOT DEFINED CMAKE_TOOLCHAIN_FILE AND EXISTS C:/vcpkg/scripts/builds
 endif()
 
 project(dqrobotics-interface-mujoco
-        VERSION 1.1
+        VERSION 1.2
         DESCRIPTION "An unofficial DQ Robotics interface for C++17 to interact with Mujoco."
         HOMEPAGE_URL "https://github.com/juanjqo/cpp-interface-mujoco"
         LANGUAGES CXX)
