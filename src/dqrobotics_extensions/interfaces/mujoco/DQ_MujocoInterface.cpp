@@ -14,6 +14,9 @@ Copyright 2021 DeepMind Technologies Limited, licensed under the Apache License,
 #include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h>
 #include "DQ_MujocoSceneBuilderImpl.h"
 #include "DQ_MujocoCameras.h"
+#ifdef DQ_MUJOCO_HAS_GUI
+#include "DQ_MujocoGui.h"
+#endif
 #include <set>
 #include <unordered_map>
 #include <mutex>
@@ -69,8 +72,38 @@ public:
         }
     }
 
+#ifdef DQ_MUJOCO_HAS_GUI
+    static void key_callback(GLFWwindow* window, int key, [[maybe_unused]] int scancode, int action, int mods) {
+        Impl* self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
+        if (self && self->_gui_active())
+            self->gui_->on_key(key, mods, action != GLFW_RELEASE);
+    }
+
+    static void char_callback(GLFWwindow* window, unsigned int codepoint) {
+        Impl* self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
+        if (self && self->_gui_active())
+            self->gui_->on_char(codepoint);
+    }
+
+    static void focus_callback(GLFWwindow* window, int focused) {
+        Impl* self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
+        if (self && self->_gui_active())
+            self->gui_->on_focus(focused == GLFW_TRUE);
+    }
+#endif
+
     // Mouse button handler
     void mouse_button(GLFWwindow* window, [[maybe_unused]] int button, [[maybe_unused]] int action, [[maybe_unused]] int mods) {
+#ifdef DQ_MUJOCO_HAS_GUI
+        if (_gui_active())
+        {
+            gui_->on_mouse_button(button, action == GLFW_PRESS, mods);
+            // A click on a panel is for the GUI, and Ctrl + drag drags the selected body (see
+            // _perturb()): not for the camera
+            if (action == GLFW_PRESS && (gui_->wants_mouse() || ((mods & GLFW_MOD_CONTROL) && gui_->has_selection())))
+                return;
+        }
+#endif
         button_left_ = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS);
         button_middle_ = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS);
         button_right_ = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS);
@@ -79,6 +112,10 @@ public:
 
     // Mouse move handler
     void mouse_move(GLFWwindow* window, double xpos, double ypos) {
+#ifdef DQ_MUJOCO_HAS_GUI
+        if (_gui_active())
+            gui_->on_mouse_move(xpos, ypos);
+#endif
         if (!button_left_ && !button_middle_ && !button_right_)
             return;
         double dx = xpos - lastx_;
@@ -106,6 +143,14 @@ public:
 
     // Scroll handler
     void scroll([[maybe_unused]] GLFWwindow* window, double yoffset) {
+#ifdef DQ_MUJOCO_HAS_GUI
+        if (_gui_active())
+        {
+            gui_->on_scroll(0, yoffset);
+            if (gui_->wants_mouse())
+                return;  // scrolls a panel
+        }
+#endif
         std::lock_guard<std::mutex> lock(viewer_mutex_);
         mjv_moveCamera(m_, mjMOUSE_ZOOM, 0, 0.05 * yoffset, &cam_);
     }
@@ -139,6 +184,10 @@ public:
     // Physics thread
     std::unique_ptr<ThreadManager> physics_thread_;
     std::atomic<bool> simulation_running_{false};
+    // The program steps the simulation with trigger_next_simulation_step() (until it calls
+    // start_simulation()): the GUI must not start the real-time simulation, which would make the
+    // program's next step throw
+    std::atomic<bool> stepped_by_program_{false};
     double anchor_simulation_time_{0};          // simulation time and wall-clock time from which
     steady_clock::time_point anchor_wall_time_;  // the physics thread keeps real time
     std::atomic<int> max_steps_per_tick_{1};
@@ -162,7 +211,45 @@ public:
     bool viewer_has_context_{false};  // only used by the viewer thread
     std::atomic<int> framebuffer_width_{0};
     std::atomic<int> framebuffer_height_{0};
+    std::atomic<int> screen_width_{0};   // size of the window in screen coordinates (for the GUI)
+    std::atomic<int> screen_height_{0};
     steady_clock::time_point last_event_poll_;
+
+    // GUI of the viewer (set_gui_enabled()). gui_ is created by the main thread, under viewer_mutex_,
+    // and drawn by the viewer thread. Its requests (play, pause, step, reset) are run by the main
+    // thread in poll_events(), like calls of the user.
+    std::atomic<bool> gui_enabled_{false};
+#ifdef DQ_MUJOCO_HAS_GUI
+    std::unique_ptr<MujocoGui> gui_;
+    MujocoGui::State gui_state_;  // only used by the viewer thread
+#endif
+    // Perturbation of a body with the mouse (Ctrl + drag in the GUI), protected by physics_mutex_:
+    // set by the viewer thread, applied before each step
+    mjvPerturb pert_;
+    bool perturb_force_applied_{false};
+#ifdef DQ_MUJOCO_HAS_GUI
+    // The body dragged with the gizmo (GUI), held at its pose before each step. Protected by
+    // physics_mutex_, like the fixed bodies moved with it (by name), which the main thread writes
+    // in the specification so that edit_scene() keeps them.
+    struct GizmoHold
+    {
+        bool active = false;
+        int body = -1;
+        MujocoGui::Movable movable = MujocoGui::Movable::NONE;
+        mjtNum pos[3] = {0, 0, 0};
+        mjtNum quat[4] = {1, 0, 0, 0};
+    };
+    GizmoHold gizmo_hold_;
+    std::vector<std::string> gizmo_moved_fixed_bodies_;
+    // The joint dragged with its slider (Joints panel), held at its position before each step
+    struct JointHold
+    {
+        bool active = false;
+        int joint = -1;
+        mjtNum value = 0;
+    };
+    JointHold joint_hold_;
+#endif
 
     // Camera thread (from the first start_camera() on): renders the cameras offscreen, with its own
     // OpenGL context. Its lock order: it takes physics_mutex_ to copy the state.
@@ -258,6 +345,7 @@ public:
         mjv_defaultOption(&opt_);
         mjv_defaultScene(&scn_);
         mjr_defaultContext(&con_);
+        mjv_defaultPerturb(&pert_);
     };
 
     /**
@@ -271,6 +359,9 @@ public:
 
         // free visualization storage while the window (and its OpenGL context) still exists
         _free_visualization();
+#ifdef DQ_MUJOCO_HAS_GUI
+        gui_.reset();  // the OpenGL context is current in this thread (_free_visualization())
+#endif
 
         // close the window, and GLFW if this is the last interface using it
         if (window_) glfwDestroyWindow(window_);
@@ -434,6 +525,13 @@ public:
         m_ = m;
         d_ = d;
         snapshot_ = snapshot;
+        mjv_defaultPerturb(&pert_);  // the bodies of the previous model
+        perturb_force_applied_ = false;
+#ifdef DQ_MUJOCO_HAS_GUI
+        gizmo_hold_ = GizmoHold();
+        gizmo_moved_fixed_bodies_.clear();
+        joint_hold_ = JointHold();
+#endif
         spec_ = spec;
         vfs_ = std::move(vfs);
         camera_tracking_body_.clear();
@@ -511,6 +609,11 @@ public:
             glfwSetMouseButtonCallback(window_, &Impl::mouse_button_callback);
             glfwSetCursorPosCallback(window_, &Impl::mouse_move_callback);
             glfwSetScrollCallback(window_, &Impl::scroll_callback);
+#ifdef DQ_MUJOCO_HAS_GUI
+            glfwSetKeyCallback(window_, &Impl::key_callback);
+            glfwSetCharCallback(window_, &Impl::char_callback);
+            glfwSetWindowFocusCallback(window_, &Impl::focus_callback);
+#endif
         }
         glfwMakeContextCurrent(window_);
 
@@ -539,6 +642,14 @@ public:
         glfwGetFramebufferSize(window_, &framebuffer_width, &framebuffer_height);
         framebuffer_width_ = framebuffer_width;
         framebuffer_height_ = framebuffer_height;
+        int screen_width, screen_height;
+        glfwGetWindowSize(window_, &screen_width, &screen_height);
+        screen_width_ = screen_width;
+        screen_height_ = screen_height;
+#ifdef DQ_MUJOCO_HAS_GUI
+        if (gui_enabled_)
+            _create_gui();
+#endif
 
         last_time_ = std::chrono::high_resolution_clock::now();
         _start_viewer();
@@ -601,6 +712,14 @@ public:
             throw std::runtime_error(std::string("Failed to apply the changes to the scene: ")
                                      + mjs_getError(spec_));
         _apply_visual_settings();
+        // The body ids can change: stop dragging any body
+        mjv_defaultPerturb(&pert_);
+        mju_zero(d_->xfrc_applied, 6 * m_->nbody);
+        perturb_force_applied_ = false;
+#ifdef DQ_MUJOCO_HAS_GUI
+        gizmo_hold_ = GizmoHold();
+        joint_hold_ = JointHold();
+#endif
 
         // The sizes of the model changed
         {
@@ -818,19 +937,72 @@ public:
 
         {
             std::lock_guard<std::mutex> viewer_lock(viewer_mutex_);
+#ifdef DQ_MUJOCO_HAS_GUI
+            MujocoGui* gui = gui_enabled_ ? gui_.get() : nullptr;
+#endif
             double simulation_time;
             {
                 std::lock_guard<std::mutex> physics_lock(physics_mutex_);
-                mjv_updateScene(m_, d_, &opt_, NULL, &cam_, mjCAT_ALL, &scn_);
+                mjv_updateScene(m_, d_, &opt_, &pert_, &cam_, mjCAT_ALL, &scn_);
                 simulation_time = d_->time;
+#ifdef DQ_MUJOCO_HAS_GUI
+                if (gui)
+                    gui_state_.copy(m_, d_);  // the panels are drawn without the physics lock
+#endif
             }
             for (const auto& [name, frame] : frames)
                 _draw_reference_frame(name, frame);
+#ifdef DQ_MUJOCO_HAS_GUI
+            if (gui)
+                gui->highlight_selection(m_, scn_);
+#endif
 
-            const mjrRect viewport = {0, 0, framebuffer_width_.load(), framebuffer_height_.load()};
+            mjrRect viewport = {0, 0, framebuffer_width_.load(), framebuffer_height_.load()};
+            bool gui_drawn = false;
+#ifdef DQ_MUJOCO_HAS_GUI
+            if (gui)
+            {
+                // The GUI fills the window and leaves the 3D view in the middle. The statistics
+                // replace the text overlay.
+                const MujocoGui::Statistics statistics{simulation_running_.load(), stepped_by_program_.load(),
+                                                       real_time_factor_.load(), fps_,
+                                                       avg_computation_time_microseconds_.load()};
+                viewport = gui->begin_frame({m_, gui_state_, opt_, scn_, cam_, camera_tracking_body_, statistics,
+                                             screen_width_.load(), screen_height_.load(),
+                                             viewport.width, viewport.height});
+                // A click in the 3D view selects the body under the cursor, in the scene as drawn
+                MujocoGui::Pick pick;
+                if (gui->take_pick(pick))
+                {
+                    // MuJoCo documents geomid, flexid and skinid as nullable, but mjv_select()
+                    // writes them unconditionally
+                    mjtNum point[3] = {0, 0, 0};
+                    int geom_id = -1, flex_id = -1, skin_id = -1;
+                    std::lock_guard<std::mutex> physics_lock(physics_mutex_);
+                    const int body = mjv_select(m_, d_, &opt_, pick.aspect_ratio, pick.relx, pick.rely,
+                                                &scn_, point, &geom_id, &flex_id, &skin_id);
+                    // The clicked point in the body frame: where a drag holds the body
+                    mjtNum local_point[3] = {0, 0, 0};
+                    if (body > 0)
+                    {
+                        mjtNum offset[3];
+                        mju_sub3(offset, point, d_->xpos + 3 * body);
+                        mju_mulMatTVec3(local_point, d_->xmat + 9 * body, offset);
+                    }
+                    gui->select_body(body, local_point);
+                }
+                _perturb(gui->perturb_input());
+                _gizmo(gui->gizmo_input());
+                _joint(gui->joint_input());
+                mjr_render(viewport, &scn_, &con_);
+                gui->render();
+                gui_drawn = true;
+            }
+            else
+#endif
             mjr_render(viewport, &scn_, &con_);
 
-            if (show_profiler_)
+            if (show_profiler_ && !gui_drawn)
             {
                 std::string text = "t: " + std::to_string(simulation_time) + "s";
                 mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, {viewport.width - 310, viewport.height - 210, 300, 200},
@@ -908,7 +1080,279 @@ public:
         glfwGetFramebufferSize(window_, &width, &height);
         framebuffer_width_ = width;
         framebuffer_height_ = height;
+        glfwGetWindowSize(window_, &width, &height);
+        screen_width_ = width;
+        screen_height_ = height;
+#ifdef DQ_MUJOCO_HAS_GUI
+        if (gui_)
+        {
+            _run_gui_requests();
+            _keep_moved_fixed_bodies();
+        }
+#endif
     }
+
+#ifdef DQ_MUJOCO_HAS_GUI
+    /**
+     * @brief _perturb drives MuJoCo's perturbation of the selected body with the mouse (Ctrl + drag
+     *        in the GUI). While the simulation steps, _step() pulls the body towards the mouse with
+     *        a spring force, so the dynamics respond (contacts, joints, controllers). While it does
+     *        not run in real time, free and kinematic bodies are also moved to the mouse at once,
+     *        as in a paused simulation. Viewer thread, with viewer_mutex_ held.
+     */
+    void _perturb(const MujocoGui::PerturbInput& input)
+    {
+        const bool moved = input.dx != 0 || input.dy != 0;
+        if (!input.start && !input.end && !moved && !pert_.active)
+            return;
+        std::lock_guard<std::mutex> lock(physics_mutex_);
+        if (input.start && input.body > 0 && input.body < m_->nbody)
+        {
+            pert_.select = input.body;
+            mju_copy3(pert_.localpos, input.localpos);
+            mjv_initPerturb(m_, d_, &scn_, &pert_);  // the reference is the current pose
+            pert_.active = input.active;
+        }
+        if (input.end)
+        {
+            pert_.active = 0;
+            pert_.select = 0;
+            return;
+        }
+        if (!pert_.active)
+            return;
+        if (moved)
+            mjv_movePerturb(m_, d_, input.action, input.dx, input.dy, &scn_, &pert_);
+        if (!simulation_running_)
+        {
+            mjv_applyPerturbPose(m_, d_, &pert_, 1);
+            mj_forward(m_, d_);
+        }
+    }
+
+    /**
+     * @brief _gizmo moves the body dragged with the gizmo (GUI) to the pose of the gizmo, and holds
+     *        it there while it is dragged: _step() applies the pose before each step, so the
+     *        dynamics do not move the body away. Free bodies are released with zero velocity.
+     *        Viewer thread, with viewer_mutex_ held.
+     */
+    void _gizmo(const MujocoGui::GizmoInput& input)
+    {
+        if (!input.moved && !input.end)
+            return;
+        std::lock_guard<std::mutex> lock(physics_mutex_);
+        if (input.moved && input.body > 0 && input.body < m_->nbody)
+        {
+            const MujocoGui::Movable movable = MujocoGui::movable(m_, input.body);
+            if (movable != MujocoGui::Movable::NONE)
+            {
+                gizmo_hold_.active = true;
+                gizmo_hold_.body = input.body;
+                gizmo_hold_.movable = movable;
+                mju_copy3(gizmo_hold_.pos, input.pos);
+                mju_copy4(gizmo_hold_.quat, input.quat);
+                _apply_gizmo_hold();
+                if (simulation_running_)
+                    _publish_state();
+                else
+                    mj_forward(m_, d_);
+            }
+        }
+        if (input.end && gizmo_hold_.active)
+        {
+            if (gizmo_hold_.movable == MujocoGui::Movable::FIXED)
+                if (const char* name = mj_id2name(m_, mjOBJ_BODY, gizmo_hold_.body))
+                    gizmo_moved_fixed_bodies_.push_back(name);
+            gizmo_hold_.active = false;
+        }
+    }
+
+    /**
+     * @brief _joint moves the joint dragged with its slider (GUI) to the position of the slider, and
+     *        holds it there while it is dragged (with zero velocity), as set_joint_positions() does.
+     *        When it is released, its actuator (and the program) move it again. Viewer thread,
+     *        with viewer_mutex_ held.
+     */
+    void _joint(const MujocoGui::JointInput& input)
+    {
+        if (!input.moved && !input.end)
+            return;
+        std::lock_guard<std::mutex> lock(physics_mutex_);
+        const int j = input.joint;
+        if (input.moved && j >= 0 && j < m_->njnt && (m_->jnt_type[j] == mjJNT_HINGE || m_->jnt_type[j] == mjJNT_SLIDE))
+        {
+            joint_hold_.active = true;
+            joint_hold_.joint = j;
+            joint_hold_.value = input.value;
+            _apply_joint_hold();
+            if (simulation_running_)
+                _publish_state();
+            else
+                mj_forward(m_, d_);
+        }
+        if (input.end)
+            joint_hold_.active = false;
+    }
+
+    /**
+     * @brief _apply_joint_hold puts the joint dragged with its slider at its position, with zero
+     *        velocity. The caller holds physics_mutex_.
+     */
+    void _apply_joint_hold()
+    {
+        const int j = joint_hold_.joint;
+        d_->qpos[m_->jnt_qposadr[j]] = joint_hold_.value;
+        d_->qvel[m_->jnt_dofadr[j]] = 0;
+    }
+
+    /**
+     * @brief _apply_gizmo_hold puts the body dragged with the gizmo at its pose: in the state (free
+     *        bodies, with zero velocity, and kinematic bodies) or in the model (fixed bodies
+     *        attached to the world). The caller holds physics_mutex_.
+     */
+    void _apply_gizmo_hold()
+    {
+        const int body = gizmo_hold_.body;
+        switch (gizmo_hold_.movable)
+        {
+        case MujocoGui::Movable::FREE:
+        {
+            const int joint = m_->body_jntadr[body];
+            mjtNum* qpos = d_->qpos + m_->jnt_qposadr[joint];
+            mju_copy3(qpos, gizmo_hold_.pos);
+            mju_copy4(qpos + 3, gizmo_hold_.quat);
+            mju_zero(d_->qvel + m_->jnt_dofadr[joint], 6);
+            break;
+        }
+        case MujocoGui::Movable::KINEMATIC:
+        {
+            const int mocap = m_->body_mocapid[body];
+            mju_copy3(d_->mocap_pos + 3 * mocap, gizmo_hold_.pos);
+            mju_copy4(d_->mocap_quat + 4 * mocap, gizmo_hold_.quat);
+            break;
+        }
+        case MujocoGui::Movable::FIXED:  // its parent is the world: the pose in the world
+            mju_copy3(m_->body_pos + 3 * body, gizmo_hold_.pos);
+            mju_copy4(m_->body_quat + 4 * body, gizmo_hold_.quat);
+            break;
+        case MujocoGui::Movable::NONE:
+            break;
+        }
+    }
+
+    /**
+     * @brief _keep_moved_fixed_bodies writes the poses of the fixed bodies moved with the gizmo in
+     *        the specification, so that edit_scene() (which compiles it) keeps them. A body of a
+     *        robot placed with DQ_MujocoSceneBuilder::add_robot() is in a frame: its pose in the
+     *        specification is relative to it. Main thread only (it owns the specification).
+     */
+    void _keep_moved_fixed_bodies()
+    {
+        std::vector<std::string> names;
+        {
+            std::lock_guard<std::mutex> lock(physics_mutex_);
+            names.swap(gizmo_moved_fixed_bodies_);
+        }
+        for (const std::string& name : names)
+        {
+            mjtNum pos[3], quat[4];
+            {
+                std::lock_guard<std::mutex> lock(physics_mutex_);
+                const int body = mj_name2id(m_, mjOBJ_BODY, name.c_str());
+                if (body < 0)
+                    continue;
+                mju_copy3(pos, m_->body_pos + 3 * body);
+                mju_copy4(quat, m_->body_quat + 4 * body);
+            }
+            mjsBody* spec_body = mjs_findBody(spec_, name.c_str());
+            if (!spec_body)
+                continue;
+            if (mjsFrame* frame = mjs_getFrame(spec_body->element))
+            {
+                if (mjs_getFrame(frame->element) || frame->alt.type != mjORIENTATION_QUAT)
+                {
+                    std::cerr << "DQ_MujocoInterface: the new pose of \"" << name << "\" is not kept by "
+                              << "edit_scene() (it is in a nested or rotated frame)." << std::endl;
+                    continue;
+                }
+                // The pose relative to the frame
+                mjtNum frame_quat[4], inverse[4], offset[3], q[4];
+                mju_copy4(frame_quat, frame->quat);
+                mju_normalize4(frame_quat);
+                mju_negQuat(inverse, frame_quat);
+                mju_sub3(offset, pos, frame->pos);
+                mju_rotVecQuat(pos, offset, inverse);
+                mju_mulQuat(q, inverse, quat);
+                mju_copy4(quat, q);
+            }
+            mju_copy3(spec_body->pos, pos);
+            mju_copy4(spec_body->quat, quat);
+            spec_body->alt.type = mjORIENTATION_QUAT;
+        }
+    }
+#endif
+
+    /**
+     * @brief _gui_active whether the GUI is drawn (it exists and is enabled).
+     */
+    bool _gui_active() const
+    {
+#ifdef DQ_MUJOCO_HAS_GUI
+        return gui_ && gui_enabled_;
+#else
+        return false;
+#endif
+    }
+
+#ifdef DQ_MUJOCO_HAS_GUI
+    /**
+     * @brief _create_gui creates the GUI, if it does not exist yet and there is a window. Main
+     *        thread only (it asks GLFW for the content scale of the window).
+     */
+    void _create_gui()
+    {
+        if (gui_ || !window_)
+            return;
+        // Scale for high-DPI displays. Where the framebuffer is already larger than the window
+        // (macOS, Wayland), ImGui scales by that ratio itself.
+        float scale_x = 1, scale_y = 1;
+        glfwGetWindowContentScale(window_, &scale_x, &scale_y);
+        const float framebuffer_scale = screen_width_ > 0
+                                        ? static_cast<float>(framebuffer_width_) / screen_width_ : 1.0f;
+        auto gui = std::make_unique<MujocoGui>(scale_x / std::max(1.0f, framebuffer_scale));
+        std::lock_guard<std::mutex> lock(viewer_mutex_);
+        gui_ = std::move(gui);
+    }
+
+    /**
+     * @brief _run_gui_requests runs the actions asked in the GUI (play, pause, step, reset), as if
+     *        the user called the corresponding methods. Main thread only.
+     */
+    void _run_gui_requests()
+    {
+        const MujocoGui::Requests requests = gui_->take_requests();
+        try
+        {
+            // A program that steps the simulation is its clock: the GUI does not run nor step it
+            // (a request sent before the program's first step is ignored here)
+            if (requests.toggle_simulation)
+            {
+                if (simulation_running_)
+                    _stop_simulation();
+                else if (!stepped_by_program_)
+                    _start_simulation();
+            }
+            if (requests.step && !simulation_running_ && !stepped_by_program_)
+                step_simulation();
+            if (requests.reset)
+                reset(requests.reset_keyframe);
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "DQ_MujocoInterface: the action of the GUI failed: " << e.what() << std::endl;
+        }
+    }
+#endif
 
     //----------------------------------------------------------------------------------------------
     // Physics thread
@@ -966,6 +1410,28 @@ public:
      */
     void _step()
     {
+        // The body dragged with the mouse (GUI) is pulled towards the mouse by a spring force,
+        // and kinematic bodies follow it. The force is cleared when the drag ends.
+        if (pert_.active)
+        {
+            mju_zero(d_->xfrc_applied, 6 * m_->nbody);
+            mjv_applyPerturbPose(m_, d_, &pert_, 0);
+            mjv_applyPerturbForce(m_, d_, &pert_);
+            perturb_force_applied_ = true;
+        }
+        else if (perturb_force_applied_)
+        {
+            mju_zero(d_->xfrc_applied, 6 * m_->nbody);
+            perturb_force_applied_ = false;
+        }
+#ifdef DQ_MUJOCO_HAS_GUI
+        // The body dragged with the gizmo stays where the gizmo is, and the joint dragged with its
+        // slider where the slider is
+        if (gizmo_hold_.active)
+            _apply_gizmo_hold();
+        if (joint_hold_.active)
+            _apply_joint_hold();
+#endif
         const auto start = std::chrono::high_resolution_clock::now();
         mj_step(m_, d_);
         const auto end = std::chrono::high_resolution_clock::now();
@@ -1843,10 +2309,35 @@ void DQ_MujocoInterface::load_model(const DQ_MujocoModel& model)
 
 
 
+/**
+ * @brief Advance the simulation by one timestep (stepped simulation)
+ *
+ * Calls MuJoCo's mj_step() once: the simulation time advances by the timestep of the model
+ * (<option timestep="..."/>, 0.002 s by default), and the getters then read the state after the
+ * step. The commands (set_joint_target_*) written before the call are applied in it. It does not
+ * wait: to run in real time, pace the loop at the timestep (e.g., with a sas Clock); otherwise the
+ * simulation runs as fast as the computer allows. The viewer thread draws the window meanwhile.
+ * @code
+ * while (!mi.should_close_window())
+ * {
+ *     mi.set_joint_target_positions(joints, controller(mi.get_joint_positions(joints)));
+ *     mi.trigger_next_simulation_step();
+ *     clock.update_and_sleep();
+ * }
+ * @endcode
+ *
+ * Use it for deterministic experiments and per-step control; start_simulation() runs the
+ * simulation in real time instead. The program is then the clock of the simulation: the GUI (see
+ * set_gui_enabled()) does not play or step it, until the program calls start_simulation().
+ *
+ * @throws std::runtime_error If no model is loaded, or the simulation runs in real time
+ *         (start_simulation(); call stop_simulation() first)
+ */
 void DQ_MujocoInterface::trigger_next_simulation_step()
 {
     _check_model();
     impl_->step_simulation();
+    impl_->stepped_by_program_ = true;
 }
 
 double DQ_MujocoInterface::get_simulation_time() const
@@ -1888,6 +2379,7 @@ void DQ_MujocoInterface::start_simulation()
 {
     _check_model();
     impl_->_start_simulation();
+    impl_->stepped_by_program_ = false;  // the GUI can pause and play it again
 }
 
 /**
@@ -2910,6 +3402,87 @@ void DQ_MujocoInterface::set_camera_tracking(const std::string& bodyname)
 }
 
 /**
+ * @brief Whether this build of the library has the GUI of the viewer (see set_gui_enabled())
+ * @return false if the library was built with DQ_MUJOCO_BUILD_GUI=OFF.
+ */
+bool DQ_MujocoInterface::is_gui_available()
+{
+#ifdef DQ_MUJOCO_HAS_GUI
+    return true;
+#else
+    return false;
+#endif
+}
+
+/**
+ * @brief Show or hide the GUI of the viewer
+ * @param flag true to show the GUI, false to show only the 3D view (default).
+ *
+ * The GUI surrounds the 3D view with docked panels, in the style of the editors of 3D tools:
+ * - Scene: the tree of bodies, with a search box. Select a body to see its properties, here or by
+ *   clicking it in the 3D view (Escape: none). The selected body and its children are highlighted.
+ *   Ctrl + drag in the 3D view interacts with the selected body, as in MuJoCo's simulate: left
+ *   rotates it and right moves it (Shift: in the horizontal plane). While the simulation steps, a
+ *   spring force pulls the body towards the mouse, so the robot and its controller respond to it;
+ *   otherwise free and kinematic bodies are moved to the mouse at once.
+ * - Gizmo, as in Omniverse: the selected body gets handles to move (W) and rotate (E) it, in the
+ *   world or body axes (toolbar in the 3D view; Q: no gizmo). It moves free bodies (objects,
+ *   floating bases), kinematic bodies, and fixed bodies attached to the world (e.g., the base of a
+ *   fixed robot, which moves the whole robot); bodies moved by their joints have none. A dragged
+ *   body is held at the gizmo, also while the simulation runs, and free bodies are released with
+ *   zero velocity. Fixed bodies keep their new pose, also in edit_scene(); reset_simulation() puts
+ *   free and kinematic bodies back.
+ * - Pose fields (Properties panel) for the bodies that the gizmo moves: the position (m) and the
+ *   rotation, as Euler XYZ angles in degrees (about the world X, then Y, then Z axes: roll, pitch,
+ *   yaw) or as a quaternion. Drag a value, or double-click it to type one.
+ * - Joint sliders (Joints panel): move a hinge or slide joint within its limits, as
+ *   set_joint_positions() does; it is held there while the slider is dragged, and then its actuator
+ *   moves it again.
+ * - Navigation gizmo (top-right corner of the 3D view): the axes of the world (X, Y, Z), as in
+ *   Blender. Click an axis to look along it, or drag the gizmo to turn the camera.
+ * - Properties: the pose of the selected body (position and rotation), its mass, and a button
+ *   to follow it with the camera.
+ * - Joints: the position (within its limits) and velocity of each hinge and slide joint.
+ * - Sensors: the values of the sensors of the model.
+ * - Visualization: rendering options, elements to show (joints, contacts, ...), frames, labels
+ *   and groups.
+ * The menu bar has the simulation controls (play, pause, step, reset, reset to a keyframe) and the
+ * camera (free, following a body, or a camera of the model), and the status bar shows the
+ * simulation time, the real-time factor and the frame rate. The panels can be moved, docked
+ * elsewhere, or closed (View menu).
+ *
+ * The simulation controls act as the corresponding methods called by the program: play and pause
+ * are start_simulation() and stop_simulation(), and step is trigger_next_simulation_step(). They run
+ * in the main thread, in should_close_window(). Keys: Space (play/pause), Right (step), Backspace
+ * (reset). In a program that steps the simulation itself (trigger_next_simulation_step()), play
+ * and step are disabled: the program is the clock (playing would make its next step throw).
+ *
+ * Call it from the main thread, before or after load_model(). In HEADLESS mode it has no effect.
+ *
+ * @throws std::runtime_error If flag is true and the library has no GUI (see is_gui_available())
+ */
+void DQ_MujocoInterface::set_gui_enabled(const bool& flag)
+{
+#ifdef DQ_MUJOCO_HAS_GUI
+    impl_->gui_enabled_ = flag;
+    if (flag)
+        impl_->_create_gui();
+#else
+    if (flag)
+        throw std::runtime_error(error_msg_layout_ + "set_gui_enabled. This build of the library has no GUI "
+                                 "(it was built with DQ_MUJOCO_BUILD_GUI=OFF).");
+#endif
+}
+
+/**
+ * @brief Whether the GUI of the viewer is enabled (see set_gui_enabled())
+ */
+bool DQ_MujocoInterface::is_gui_enabled() const
+{
+    return impl_->gui_enabled_;
+}
+
+/**
  * @brief Edit the loaded scene, also while the simulation runs: add or remove objects, sites,
  *        lights and robots
  * @param edit A function that edits the scene with the methods of DQ_MujocoSceneBuilder, e.g.,
@@ -2946,6 +3519,9 @@ void DQ_MujocoInterface::edit_scene(const std::function<void(DQ_MujocoSceneBuild
 {
     _check_model();
     Impl& impl = *impl_;
+#ifdef DQ_MUJOCO_HAS_GUI
+    impl._keep_moved_fixed_bodies();  // the bodies moved with the gizmo stay where they are
+#endif
 
     // Edit the specification, and check the result before changing the model, since a failed
     // mj_recompile() would leave the model and the data invalid. The checks compile a copy: the

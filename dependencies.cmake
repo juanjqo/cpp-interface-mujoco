@@ -36,6 +36,42 @@ if(UNIX AND NOT APPLE AND TARGET mujoco)
     endforeach()
 endif()
 
+# Dear ImGui (docking branch), for the GUI of the viewer. It is built into this library (see
+# CMakeLists.txt) and not installed. It has no CMakeLists.txt, so FetchContent only downloads it.
+if(DQ_MUJOCO_BUILD_GUI)
+    set(IMGUI_VERSION "1.93.0-docking")
+    FetchContent_Declare(
+        imgui
+        URL https://github.com/ocornut/imgui/archive/refs/tags/v${IMGUI_VERSION}.tar.gz
+    )
+    FetchContent_MakeAvailable(imgui)
+
+    # ImGuizmo, the gizmo of the GUI (handles to move and rotate bodies), built into this library
+    # with ImGui. Its context is made per thread (cmake/PatchThreadLocal.cmake).
+    set(IMGUIZMO_COMMIT "105e4fde45e4e74aae8973d98750820ef7aca7e2")
+    FetchContent_Declare(
+        imguizmo
+        URL https://github.com/CedricGuillemet/ImGuizmo/archive/${IMGUIZMO_COMMIT}.tar.gz
+        PATCH_COMMAND ${CMAKE_COMMAND} -DLIBRARY=ImGuizmo -DFILE=<SOURCE_DIR>/src/ImGuizmo.cpp
+                      -P ${CMAKE_CURRENT_LIST_DIR}/cmake/PatchThreadLocal.cmake
+        # Only its sources are used, not its CMakeLists.txt (other widgets and an example): a
+        # SOURCE_SUBDIR without CMakeLists.txt makes FetchContent only download it
+        SOURCE_SUBDIR none
+    )
+    FetchContent_MakeAvailable(imguizmo)
+
+    # ImOGuizmo (header only), the navigation gizmo of the GUI: the axes of the world in a corner
+    # of the 3D view, as in Blender, to turn the camera. Its state is made per thread too.
+    set(IMOGUIZMO_COMMIT "a6028d0c1c8a6f067f3ff1c5d177f8f601dcc509")
+    FetchContent_Declare(
+        imoguizmo
+        URL https://github.com/fknfilewalker/imoguizmo/archive/${IMOGUIZMO_COMMIT}.tar.gz
+        PATCH_COMMAND ${CMAKE_COMMAND} -DLIBRARY=ImOGuizmo -DFILE=<SOURCE_DIR>/imoguizmo.hpp
+                      -P ${CMAKE_CURRENT_LIST_DIR}/cmake/PatchThreadLocal.cmake
+    )
+    FetchContent_MakeAvailable(imoguizmo)
+endif()
+
 set(MUJOCO_INCLUDE_DIR ${mujoco_SOURCE_DIR}/include)
 set(MUJOCO_LIB_DIR ${mujoco_SOURCE_DIR}/lib)
 
@@ -91,7 +127,8 @@ if(NOT marinholab_sas_core_FOUND)
     FetchContent_Declare(
         sas_cpp
         GIT_REPOSITORY https://github.com/MarinhoLab/sas_cpp.git
-        GIT_TAG 78cf20cc1753bd5bd63d32f02c76f9b82192e404
+        # The same sources as the previous pin (78cf20c), which a rewrite of sas_cpp's history removed
+        GIT_TAG 3160476f66b47fe53daab09cb4d619f021cd395b
     )
     FetchContent_MakeAvailable(sas_cpp)
 endif()

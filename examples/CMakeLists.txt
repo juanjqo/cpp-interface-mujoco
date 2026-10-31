@@ -18,6 +18,9 @@ set(ROBOT_EXAMPLES
     sensors
     cameras
 )
+if(DQ_MUJOCO_BUILD_GUI)
+    list(APPEND ROBOT_EXAMPLES gui)
+endif()
 if(DQ_MUJOCO_BUILD_ROBOTS)
     list(APPEND EXAMPLES ${ROBOT_EXAMPLES})
 endif()

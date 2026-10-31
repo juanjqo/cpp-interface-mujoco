@@ -2,9 +2,10 @@ Source: libdqrobotics-interface-mujoco
 Section: libdevel
 Priority: optional
 Maintainer: Juan José Quiroz Omaña <juanjqogm@gmail.com>
-# MuJoCo (and the libraries it builds in) are downloaded by CMake's
-# FetchContent during the build (dependencies.cmake), so building needs
-# network access and ca-certificates for the HTTPS download.
+# MuJoCo (and the libraries it builds in), Dear ImGui, ImGuizmo and
+# ImOGuizmo (the GUI of the viewer, built into the library) are downloaded by
+# CMake's FetchContent during the build (dependencies.cmake), so building
+# needs network access and ca-certificates for the HTTPS download.
 Build-Depends: debhelper-compat (= 13),
  dpkg-dev (>= 1.18.11),
  cmake,
