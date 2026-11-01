@@ -200,10 +200,14 @@ of uninitialized memory.
 ## Usage
 
 ```cmake
+find_package(marinholab_sas_core REQUIRED)
 find_package(dqrobotics-interface-mujoco REQUIRED)
 target_link_libraries(${YOUR_LIBRARY} PRIVATE dqrobotics_extensions::interface-mujoco)
 # for the generic robot models (GenericManipulatorRobot below); it also links the interface
-target_link_libraries(${YOUR_LIBRARY} PRIVATE dqrobotics_extensions::interface-mujoco-generic-robots)
+target_link_libraries(${YOUR_LIBRARY} PRIVATE 
+dqrobotics_extensions::interface-mujoco-generic-robots
+marinholab::sas::core
+)
 ```
 
 ```cpp
