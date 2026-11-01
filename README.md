@@ -209,6 +209,7 @@ target_link_libraries(${YOUR_LIBRARY} PRIVATE dqrobotics_extensions::interface-m
 ```cpp
 #include <dqrobotics_extensions/interfaces/mujoco/DQ_MujocoInterface.h>
 #include <dqrobotics_extensions/interfaces/mujoco/robots/GenericManipulatorRobot.h>
+#include <marinholab/sas/core/sas_clock.hpp>
 
 using namespace DQ_robotics;             // DQ, i_, j_, k_, E_, ...
 using namespace DQ_robotics_extensions;  // DQ_MujocoInterface
